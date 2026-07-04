@@ -8,8 +8,7 @@ mint its deploy credentials the same way.
 
 ## What it does
 
-- **Mint**: resolve human permission names (`DNS:Edit`, `Cloudflare
-  Pages:Edit`, …) to Cloudflare permission-group UUIDs, resolve zone names to
+- **Mint**: resolve human permission names (`DNS:Edit`, `Pages:Edit`, …) to Cloudflare permission-group UUIDs, resolve zone names to
   zone ids, split zone- vs account-scoped permissions into the right policies,
   `POST /user/tokens`, then **verify the minted token actually authenticates**
   (as itself, retried through Cloudflare's ~2-minute propagation window)
@@ -39,11 +38,11 @@ CF_MINTER_TOKEN=… ./cf-mint-token.sh --list
 
 # Preview a mint (no network calls):
 CF_MINTER_TOKEN=… ./cf-mint-token.sh --dry-run \
-  --name my-project-deploy --perm "Cloudflare Pages:Edit"
+  --name my-project-deploy --perm "Pages:Edit" --perm "Pages:Read"
 
 # Mint a Pages deploy token (account-scoped, no zones needed):
 CF_MINTER_TOKEN=… CF_ACCOUNT_ID=… ./cf-mint-token.sh \
-  --name my-project-deploy --perm "Cloudflare Pages:Edit"
+  --name my-project-deploy --perm "Pages:Edit" --perm "Pages:Read"
 
 # Mint a DNS token scoped to exactly two zones:
 CF_MINTER_TOKEN=… ./cf-mint-token.sh \
