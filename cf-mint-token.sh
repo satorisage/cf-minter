@@ -245,7 +245,10 @@ cf(){
     fi
     return 0
   fi
-  local args=(-fsS -X "$method" "https://api.cloudflare.com/client/v4/$path"
+  # -sS (not -fsS): on a 4xx/5xx Cloudflare's JSON error body IS the diagnosis —
+  # -f would discard it and leave cf_ok able to say only "request failed".
+  # cf_ok checks .success on every response, so HTTP errors still fail hard.
+  local args=(-sS -X "$method" "https://api.cloudflare.com/client/v4/$path"
               -H "Authorization: Bearer $bearer" -H "Content-Type: application/json")
   [[ -n "$body" ]] && args+=(--data "$body")
   curl "${args[@]}"
