@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # cf-retry.sh — retry a Cloudflare API call through the token-propagation window.
-# Sourced by cf-mint-token.sh; sourcing only defines functions and has NO side
-# effects (nothing runs, nothing is printed).
+# Sourced by cf-mint-token.sh; sourcing only defines
+# functions and has NO side effects (nothing runs, nothing is printed).
 #
 # ── Why this exists ───────────────────────────────────────────────────────────
 # Cloudflare's auth edge is eventually-consistent. A just-minted, rolled, or
@@ -15,14 +15,25 @@
 #
 # ── What it retries, and what it deliberately does NOT ────────────────────────
 # Retry ONLY the propagation-transient signal:
-#   * the HTTP status is 401, OR
-#   * the JSON body is success:false carrying an error whose code is 10000.
+#   * the JSON body is success:false carrying an error whose code is 10000, OR
+#   * the HTTP status is 401 with an EMPTY body (nothing to classify — benefit of
+#     the doubt, since a propagating token also answers 401).
 # Everything else is passed straight through with no retry, because it will not
 # self-heal on a wait:
+#   * a 401 whose body carries any OTHER code — e.g. 1000 (invalid token) — is a
+#     genuinely-bad credential, not auth lag; waiting ~110s would never fix it.
 #   * code 9109 (unauthorized / out-of-scope) — a real permission gap.
 #   * origin 5xx, DNS/connection failures, malformed requests — not auth lag.
 #   * any other non-auth error.
 # Retrying those would only add latency to a certain failure.
+#
+# To make that classification possible even for callers that pass -f/--fail
+# (which suppresses the body on a 4xx and would leave every 401 unclassifiable —
+# burning the full retry budget on a genuinely-bad token), each attempt appends
+# curl's boolean negation --no-fail so the error body always survives internally.
+# The -f contract is then re-imposed on hand-back: when the caller asked for
+# fail-mode and the final status is 4xx/5xx, the wrapper prints nothing and
+# returns 22, exactly as bare `curl -f` would.
 #
 # ── Interface ─────────────────────────────────────────────────────────────────
 # cf_call_with_retry <curl-args…>
@@ -30,13 +41,16 @@
 #   the caller passes the exact curl argument list it already assembled, so the
 #   method, path, headers, body, and flags (e.g. -sS vs -fsS) are unchanged. The
 #   wrapper only:
-#     1. appends `-w '\n%{http_code}'` so it can observe the HTTP status even when
-#        the caller's own -f suppresses the response body on a 4xx,
+#     1. prepends `-w '\n%{http_code}'` to observe the HTTP status, and appends
+#        `--no-fail` so the error body survives a 4xx for classification even
+#        under a caller's -f (see above),
 #     2. runs the call, splits that status line back off,
 #     3. echoes ONLY the caller's JSON body on stdout and returns curl's own exit
-#        status — so a caller capturing `$(cf_call_with_retry …)` sees exactly the
-#        bytes it would have seen from a bare `curl`, and its existing success/error
-#        handling is unchanged.
+#        status — with -f semantics re-imposed for fail-mode callers (no body +
+#        exit 22 on a final 4xx/5xx) — so a caller capturing
+#        `$(cf_call_with_retry …)` sees exactly the bytes and status it would
+#        have seen from a bare `curl`, and its existing success/error handling is
+#        unchanged.
 #   If the response is the propagation-transient signal it retries with bounded
 #   backoff; after the final attempt it returns that last response as-is, so the
 #   caller's own error path fires with the real Cloudflare message.
@@ -71,13 +85,42 @@ cf_call_with_retry() {
   # Before-attempt delays (the first is immediate). Four retries → ≈110s of waiting.
   local -a _delays=(0 5 15 30 60)
 
-  # Buffer any piped stdin once so it can be replayed on every attempt. deploy.sh /
-  # acs-esp-setup.sh feed the Authorization header via `-H @/dev/stdin`; stdin is
-  # consumed by the first curl, so a naive re-run on retry would send no auth header
-  # and manufacture the very 401 we are trying to ride out. When stdin is a terminal
-  # there is nothing to replay.
+  # Did the caller ask for curl's fail mode (-f / --fail)? Each attempt runs with
+  # --no-fail appended so the 401 body survives for classification; this flag
+  # re-imposes the -f contract (no body, exit 22) on the final hand-back. The scan
+  # treats an element as a short-flag cluster only when it is letters-only (so an
+  # attached numeric value like -m30 can't false-match); a letters-only attached
+  # value containing 'f' (e.g. -ofile) would be misread, but no cf caller passes
+  # one and the wrapper exists for this tool's cf_* helpers.
+  # The same pass also notes whether any argument names /dev/stdin (e.g. the
+  # `-H @/dev/stdin` the stdin-feeding callers use) — that reference is what decides
+  # whether piped stdin gets buffered below.
+  local _fail_mode=0 _wants_stdin=0 _arg
+  for _arg in "$@"; do
+    case "$_arg" in
+      */dev/stdin*) _wants_stdin=1 ;;
+    esac
+    case "$_arg" in
+      --fail) _fail_mode=1 ;;
+      --*) : ;;
+      -[A-Za-z]*)
+        case "$_arg" in
+          *[!A-Za-z-]*) : ;;
+          *f*) _fail_mode=1 ;;
+        esac ;;
+    esac
+  done
+
+  # Buffer piped stdin once so it can be replayed on every attempt — but ONLY when
+  # the caller's curl args actually read stdin (an argument naming /dev/stdin).
+  # Callers that feed the Authorization header via `-H @/dev/stdin` need this:
+  # stdin is consumed by the first curl, so a naive re-run on retry would send no
+  # auth header and manufacture the very 401 we are trying to ride out. A non-tty
+  # stdin ALONE is not a signal to buffer: a backgrounded run inherits an
+  # open-but-silent pipe as fd 0, and an unconditional read on it blocks forever —
+  # a call that carries its auth in argv must never wait on stdin it will not use.
   local _stdin_buf="" _have_stdin=0
-  if [ ! -t 0 ]; then
+  if [ "$_wants_stdin" -eq 1 ] && [ ! -t 0 ]; then
     _stdin_buf="$(cat)"
     _have_stdin=1
   fi
@@ -92,33 +135,54 @@ cf_call_with_retry() {
       sleep "$delay"
     fi
 
-    # Run the caller's exact curl call plus our observability -w. The `&& … || …`
-    # list keeps a non-zero curl (e.g. -f on a 401 → exit 22) from tripping the
-    # caller's `set -e`; curl's status is captured either way.
+    # Run the caller's exact curl call plus our observability -w, with --no-fail
+    # appended AFTER the caller's args so it overrides a caller -f and the error
+    # body survives for classification. The `&& … || …` list keeps a non-zero curl
+    # (network failure etc.) from tripping the caller's `set -e`; curl's status is
+    # captured either way.
     if [ "$_have_stdin" -eq 1 ]; then
-      resp="$(printf '%s' "$_stdin_buf" | curl -w '\n%{http_code}' "$@")" && status=0 || status=$?
+      resp="$(printf '%s' "$_stdin_buf" | curl -w '\n%{http_code}' "$@" --no-fail)" && status=0 || status=$?
     else
-      resp="$(curl -w '\n%{http_code}' "$@" </dev/null)" && status=0 || status=$?
+      resp="$(curl -w '\n%{http_code}' "$@" --no-fail </dev/null)" && status=0 || status=$?
     fi
 
     # Split the trailing "\n<http_code>" back off; the rest is the caller's body.
     http_code="${resp##*$'\n'}"
     body="${resp%$'\n'*}"
 
-    if [ "$http_code" = "401" ]; then
-      reason="HTTP 401"
-    elif _cf_is_auth_10000 "$body"; then
+    if _cf_is_auth_10000 "$body"; then
       reason="auth 10000"
+    elif [ "$http_code" = "401" ] && [ -z "$body" ]; then
+      # Nothing to classify — benefit of the doubt (a propagating token answers
+      # 401 too). Rare now that --no-fail keeps the body; kept for the odd edge
+      # where the body genuinely goes missing.
+      reason="HTTP 401, empty body"
     else
-      # Success, or a failure that will not self-heal — hand it straight back.
-      printf '%s' "$body"
-      return "$status"
+      # Success, or a failure that will not self-heal — hand it straight back. A
+      # 401 carrying any non-10000 code (e.g. 1000, invalid token) lands here and
+      # returns on the FIRST attempt instead of burning the whole retry budget.
+      _cf_hand_back "$_fail_mode" "$http_code" "$body" "$status"
+      return $?
     fi
     # Transient: fall through to the next attempt (or exhaust the loop).
   done
 
   # Propagation window exhausted — return the final response so the caller's own
   # error handling fires with the real Cloudflare message.
-  printf '%s' "$body"
-  return "$status"
+  _cf_hand_back "$_fail_mode" "$http_code" "$body" "$status"
+}
+
+# _cf_hand_back FAIL_MODE HTTP_CODE BODY STATUS — emit the final response with the
+# caller's own curl semantics. Fail-mode callers get exactly what bare `curl -f`
+# gives on an HTTP error: no body, exit 22. Everyone else gets the body and curl's
+# own exit status.
+_cf_hand_back() {
+  local _fm="$1" _code="$2" _body="$3" _st="$4"
+  if [ "$_fm" -eq 1 ]; then
+    case "$_code" in
+      [45][0-9][0-9]) return 22 ;;
+    esac
+  fi
+  printf '%s' "$_body"
+  return "$_st"
 }

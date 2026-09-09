@@ -4,17 +4,22 @@
 # tokens are created declaratively (named permissions + named zones) instead of
 # by clicking through the Cloudflare dashboard.
 #
-# Standalone home of the minter (born in worksync's infra/, formalized here so
-# every project can mint scope-exact deploy tokens the same way). Operator
-# ergonomics: colored pass/fail/warn/info helpers, set -uo pipefail, a --dry-run
-# that resolves the plan and prints the exact call it WOULD send, and a fixed
-# exit-code contract (0 ok / 1 a step failed / 2 usage-or-precondition).
+# This is the SIBLING of cf-harden.sh (which drives the CF zone/edge hardening)
+# and cloudflare-origin-cert.sh (the Azure-origin side of the same migration).
+# Same operator ergonomics: colored pass/fail/warn/info helpers, set -uo pipefail,
+# a --dry-run that resolves the plan and prints the exact call it WOULD send, and
+# the same exit-code contract (0 ok / 1 a step failed / 2 usage-or-precondition).
 #
 # THE MINTER CREDENTIAL:
 #   Creating a token is itself a privileged operation — a normal scoped token
 #   cannot do it. You need a credential that carries "User API Tokens:Edit". That
 #   minter credential is read from the environment (CF_MINTER_TOKEN), or fetched
-#   from the ops vault when CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME are set. It is
+#   from the ops vault when CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME are set. Its
+#   canonical vault home is `cf-minter-token`: a DASHBOARD-created token with
+#   user-scope "API Tokens: Edit". Minter status is a MEASURED property, never a
+#   label — a credential qualifies iff GET /user/tokens/permission_groups returns
+#   200 (measured 2026-07-26: no other vaulted Cloudflare token passes that probe;
+#   the operator token verifies active but cannot mint). It is
 #   NEVER a command-line argument (argv is visible in `ps`) and is NEVER printed:
 #   it lives only in the Authorization: Bearer header built inside cf(). So
 #   --dry-run output is always safe to paste into a runbook or a log.
@@ -25,7 +30,12 @@
 #      terms (DNS:Edit, Zone Settings:Edit, SSL and Certificates:Edit,
 #      Firewall Services:Edit, DNSSEC:Edit, User API Tokens:Edit). Edit maps to
 #      the group's "Write" variant, Read to its "Read" variant.
-#   2. Resolve each --zone <name> -> its zone id, via GET /zones?name=<name>.
+#   2. Resolve each --zone <name> -> its zone id, via GET /zones?name=<name>. A
+#      caller that already HOLDS the zone id (automation reading it from its own
+#      config, where the id — not the name — is the authoritative value) passes
+#      --zone-id <id> instead and skips the lookup: the token is then scoped to
+#      exactly the zone the caller's other tooling writes to, with no name-to-id
+#      derivation in between that could aim it at a different zone.
 #   3. Split the requested permissions by scope: zone-scoped groups go in a
 #      policy whose resources are the requested zones; account-scoped groups
 #      (e.g. User API Tokens) go in a policy whose resource is the account
@@ -39,10 +49,32 @@
 #      token does not verify, NOTHING is stored and the exit code is 1.
 #   6. Only after verify passes: print the new token value ONCE, boxed, with a
 #      "store it now — it cannot be retrieved again" warning, plus the token id.
-#   7. Optionally, with --vault-secret <name> + OPS_VAULT_NAME, also store the
-#      minted token into the ops vault in the same step (value never printed).
-#      The vault write happens strictly AFTER the verify gate, so an existing
-#      working secret can never be overwritten by an unverified value.
+#      --no-print-value suppresses that box for an UNATTENDED caller, whose
+#      console output is a run log: a value printed there outlives the run in
+#      whatever captured it. It requires --vault-secret, because the vault is
+#      then the only place the value lands and a token created with nowhere to
+#      go would be created and lost in the same breath. A --value-file also
+#      satisfies it: the file is then where the value lands.
+#   6b. Optionally, with --ttl <duration>, the token is minted with an expiry
+#      (expires_on, computed here as now + duration, UTC): Cloudflare refuses the
+#      token past that moment even if nobody ever burns it. This is the floor
+#      under the mint-use-burn pattern — the burn is still the cleanup, the
+#      expiry is what bounds the damage when the burn never runs. And with
+#      --value-file <path>, the minted value is ALSO written (after the verify
+#      gate, mode 0600) to that file, for a wrapping tool that must hold the
+#      value programmatically without parsing the printed box.
+#   7. Optionally, with --vault-secret <name>, also store the minted token into a
+#      vault in the same step (value never printed). The vault write happens
+#      strictly AFTER the verify gate, so an existing working secret can never be
+#      overwritten by an unverified value.
+#
+#      WHICH vault it is written to is a separate question from where the MINTER
+#      was read: --vault-name picks the write target, defaulting to OPS_VAULT_NAME.
+#      A fleet-shared credential (e.g. cf-deploy-token) is written back to the ops
+#      vault, so the default is right for it. A credential minted PER INSTANCE and
+#      named per instance belongs in the per-instance credential vault instead, and
+#      the caller names it: --vault-name "$INSTANCE_CREDS_VAULT_NAME". The minter is
+#      always read from the ops vault either way — it is fleet-shared.
 #
 # WHAT IT DOES (revoke / burn mode):
 #   The full token lifecycle — mint, use, delete — lives in this one tool, so an
@@ -95,8 +127,10 @@ need_arg(){
     || die "$1 requires a value (got '${2:-}')"
 }
 
-NAME=""; VAULT_SECRET=""; MODE="mint"; REVOKE_ID=""
-PERMS=(); ZONES=()
+NAME=""; VAULT_SECRET=""; VAULT_NAME=""; MODE="mint"; REVOKE_ID=""
+PERMS=(); ZONES=(); ZONE_IDS=()
+PRINT_VALUE=1
+TTL=""; TTL_SECONDS=""; VALUE_FILE=""
 DRY_RUN="${DRY_RUN:-0}"
 
 usage(){
@@ -110,14 +144,43 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
   --perm <Name:Level>     permission to grant, repeatable. Level is Edit or Read.
                           e.g. --perm DNS:Edit --perm "Zone Settings:Edit"
   --zone <zonename>       zone to scope zone-permissions to, repeatable.
-                          e.g. --zone font11a.io --zone worksync.works
+                          e.g. --zone example.com --zone example.org
                           Omit -> the token is account-scoped only (no zone perms).
-  --vault-secret <name>   also store the minted token into the ops vault under
-                          this secret name (needs OPS_VAULT_NAME). Value never
-                          printed; the vault becomes the source of truth. The
-                          write happens only AFTER the minted token verifies
-                          against Cloudflare — an unverified value can never
-                          replace an existing secret.
+  --zone-id <zoneid>      same, but by zone ID — no name lookup. Repeatable, and
+                          mixable with --zone. For a caller that already holds the
+                          id as its authoritative value (so the token is scoped to
+                          exactly the zone that caller writes to).
+  --ttl <duration>        mint the token with an expiry: expires_on = now + this
+                          duration (UTC). Duration is <n>s / <n>m / <n>h / <n>d,
+                          or a bare number of seconds. Cloudflare refuses the
+                          token past that moment even if nobody burns it — the
+                          floor under an ephemeral mint-use-burn token.
+  --value-file <path>     also write the minted value to this file (created mode
+                          0600), strictly AFTER the verify gate — for a wrapping
+                          tool that must hold the value programmatically instead
+                          of parsing the printed box. Counts as a place for the
+                          value to land, so it satisfies --no-print-value.
+  --no-print-value        do NOT print the minted value box (requires
+                          --vault-secret or --value-file: that store becomes the
+                          only copy). For unattended callers whose stdout is a
+                          run log.
+  --vault-secret <name>   also store the minted token into a vault under this
+                          secret name. Value never printed; the vault becomes the
+                          source of truth. The write happens only AFTER the minted
+                          token verifies against Cloudflare — an unverified value
+                          can never replace an existing secret.
+  --vault-name <vault>    which vault --vault-secret writes to. Default:
+                          OPS_VAULT_NAME (right for a fleet-shared credential). A
+                          credential minted and named PER INSTANCE goes to the
+                          per-instance credential vault instead — pass its name
+                          here. Independent of where the MINTER is read from,
+                          which is always the ops vault.
+  --minter-cmd <cmd>      shell command that PRINTS the minter token on stdout —
+                          how you wire your own secret store (also CF_MINTER_CMD).
+  --minter-token-file <p> read the minter token from this file's first line.
+  --qualify-minter        measure whether the supplied credential can actually
+                          mint (GET /user/tokens/permission_groups must succeed),
+                          and print the verdict. Mints nothing.
   --list                  list existing tokens (id + status + name, no values)
                           instead of minting. Ignores --name/--perm/--zone.
                           Pass an id shown here to --revoke to delete that token.
@@ -137,21 +200,24 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
   -h, --help              this help.
 
 Minter credential (required, exit 2 if absent — for mint, --revoke and --burn):
-read from CF_MINTER_TOKEN, or from the ops vault when CF_MINTER_VAULT_SECRET +
-OPS_VAULT_NAME are set. It needs "User API Tokens:Edit" (a normal scoped token
+resolved in this precedence: CF_MINTER_TOKEN (env) -> --minter-cmd/CF_MINTER_CMD
+(a command that prints it) -> --minter-token-file -> CF_MINTER_VAULT_SECRET +
+OPS_VAULT_NAME (the optional Azure Key Vault path). Never an argument. It needs "User API Tokens:Edit" (a normal scoped token
 cannot create OR delete tokens). Never passed as an argument; never printed.
 
 Env:
   CF_MINTER_TOKEN         the minter credential (User API Tokens:Edit). Used to
                           mint AND to delete (--revoke / --burn).
+  CF_MINTER_CMD           shell command printing the minter token (same as
+                          --minter-cmd) — the pluggable secret-store hook.
   CF_MINTER_VAULT_SECRET  vault secret name to read the minter from (with
                           OPS_VAULT_NAME) if CF_MINTER_TOKEN is unset.
   CF_BURN_TOKEN           (--burn only) the VALUE of the token to delete. Read
                           from the environment only — never an argument, never
                           printed; it lives only in a Bearer header for the
                           self-verify call.
-  OPS_VAULT_NAME          Azure Key Vault name (for --vault-secret and/or the
-                          minter fetch).
+  OPS_VAULT_NAME          the ops vault: where the minter is read from, and the
+                          default --vault-name write target.
   CF_ACCOUNT_ID           pin the account id (skips GET /accounts; used when the
                           minter can see more than one account).
 
@@ -161,13 +227,13 @@ Examples:
 
   # Preview the exact policy + POST without creating anything:
   CF_MINTER_TOKEN=… ./cf-mint-token.sh --dry-run \
-      --name fleet-provisioner --perm DNS:Edit \
-      --zone font11a.io --zone worksync.works --vault-secret cloudflare-token
+      --name deploy-token --perm DNS:Edit \
+      --zone example.com --zone example.org --vault-secret cf-deploy-token
 
   # Mint for real and stash it in the ops vault in one step:
-  CF_MINTER_TOKEN=… OPS_VAULT_NAME=ws-ops-kv ./cf-mint-token.sh \
-      --name fleet-provisioner --perm DNS:Edit --perm "SSL and Certificates:Edit" \
-      --zone font11a.io --zone worksync.works --vault-secret cloudflare-token
+  CF_MINTER_TOKEN=… OPS_VAULT_NAME=my-vault ./cf-mint-token.sh \
+      --name deploy-token --perm DNS:Edit --perm "SSL and Certificates:Edit" \
+      --zone example.com --zone example.org --vault-secret cf-deploy-token
 
   # Delete a token by id (get the id from --list):
   CF_MINTER_TOKEN=… ./cf-mint-token.sh --revoke 0123456789abcdef0123456789abcdef
@@ -183,7 +249,16 @@ while [[ $# -gt 0 ]]; do
     --name)          need_arg "$1" "${2:-}"; NAME="$2"; shift 2 ;;
     --perm)          need_arg "$1" "${2:-}"; PERMS+=("$2"); shift 2 ;;
     --zone)          need_arg "$1" "${2:-}"; ZONES+=("$2"); shift 2 ;;
+    --zone-id)       need_arg "$1" "${2:-}"; ZONE_IDS+=("$2"); shift 2 ;;
+    --ttl)           need_arg "$1" "${2:-}"; TTL="$2"; shift 2 ;;
+    --value-file)    need_arg "$1" "${2:-}"; VALUE_FILE="$2"; shift 2 ;;
+    --no-print-value) PRINT_VALUE=0; shift ;;
+    --minter-cmd)    need_arg "$1" "${2:-}"; CF_MINTER_CMD="$2"; shift 2 ;;
+    --minter-token-file) need_arg "$1" "${2:-}"; CF_MINTER_TOKEN_FILE="$2"; shift 2 ;;
+    --minter-token)  die "--minter-token is refused on purpose: argv is world-readable in \`ps\`, so a token passed there leaks to every process on the host. Supply it as CF_MINTER_TOKEN in the environment, as --minter-token-file <path> (mode 0600), or as --minter-cmd '<command that prints it>'." ;;
     --vault-secret)  need_arg "$1" "${2:-}"; VAULT_SECRET="$2"; shift 2 ;;
+    --vault-name)    need_arg "$1" "${2:-}"; VAULT_NAME="$2"; shift 2 ;;
+    --qualify-minter) MODE="qualify"; shift ;;
     --list)          MODE="list"; shift ;;
     --revoke)        need_arg "$1" "${2:-}"; MODE="revoke"; REVOKE_ID="$2"; shift 2 ;;
     --burn)          MODE="burn"; shift ;;
@@ -197,6 +272,22 @@ done
 # Resolve it into CF_MINTER_TOKEN (from env, or the ops vault). It is required in
 # every mode — even --dry-run and --list — so the missing-minter failure is caught
 # the same way regardless. It is never echoed anywhere below this block.
+if [[ -z "${CF_MINTER_TOKEN:-}" && -n "${CF_MINTER_CMD:-}" ]]; then
+  # The pluggable fetch: any command that PRINTS the token on stdout. This is how
+  # a project wires its own secret store without this tool knowing anything about
+  # it. Its stderr is left attached so a failing fetch says why, in its own words.
+  CF_MINTER_TOKEN="$(eval "$CF_MINTER_CMD")" \
+    || die "the minter fetch command failed (its error is above): $CF_MINTER_CMD" 1
+  CF_MINTER_TOKEN="${CF_MINTER_TOKEN%%$'\n'*}"
+  [[ -n "$CF_MINTER_TOKEN" ]] \
+    || die "the minter fetch command succeeded but printed nothing: $CF_MINTER_CMD" 1
+fi
+if [[ -z "${CF_MINTER_TOKEN:-}" && -n "${CF_MINTER_TOKEN_FILE:-}" ]]; then
+  [[ -r "$CF_MINTER_TOKEN_FILE" ]] \
+    || die "minter token file not readable: $CF_MINTER_TOKEN_FILE"
+  CF_MINTER_TOKEN="$(head -n1 "$CF_MINTER_TOKEN_FILE")"
+  [[ -n "$CF_MINTER_TOKEN" ]] || die "minter token file is empty: $CF_MINTER_TOKEN_FILE"
+fi
 if [[ -z "${CF_MINTER_TOKEN:-}" ]]; then
   if [[ -n "${CF_MINTER_VAULT_SECRET:-}" && -n "${OPS_VAULT_NAME:-}" ]]; then
     command -v az >/dev/null 2>&1 || die "az CLI not found (needed to read the minter from the vault)"
@@ -205,8 +296,7 @@ if [[ -z "${CF_MINTER_TOKEN:-}" ]]; then
     [[ -n "$CF_MINTER_TOKEN" ]] || die "could not read minter secret '$CF_MINTER_VAULT_SECRET' from vault '$OPS_VAULT_NAME'"
   fi
 fi
-[[ -n "${CF_MINTER_TOKEN:-}" ]] || die "CF_MINTER_TOKEN must be set (a credential with User API Tokens:Edit), \
-or set CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME to read it from the ops vault"
+[[ -n "${CF_MINTER_TOKEN:-}" ]] || die "no minter credential — a credential carrying \"User API Tokens:Edit\" is required to create OR delete tokens. Supply exactly one of, in this precedence: CF_MINTER_TOKEN=<value> in the environment; --minter-cmd '<command that prints the token>' (or CF_MINTER_CMD) to pull it from your own secret store; --minter-token-file <path>; or CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME for the optional Azure Key Vault path."
 
 # ── common preconditions ──────────────────────────────────────────────────────
 command -v jq >/dev/null 2>&1 || die "jq not found (required)"
@@ -220,7 +310,7 @@ fi
 # valid-but-still-propagating token is retried instead of failing the verify
 # gate on the first 401. Sourcing only defines functions (no side effects), and
 # --dry-run never reaches a live call.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # infra/
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/lib/cf-retry.sh"
 
@@ -300,6 +390,31 @@ verify_minted_token(){
 # which lacks the ${var,,} expansion), matching the reference scripts' posture.
 lc(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# ── token expiry (--ttl) ──────────────────────────────────────────────────────
+# ttl_to_seconds: "<n>", "<n>s", "<n>m", "<n>h", "<n>d" -> seconds. Anything else
+# is a usage error caught before any network call. Zero is refused too — a token
+# born expired is a mint that can only fail its own verify gate.
+ttl_to_seconds(){
+  local spec="$1" n unit
+  [[ "$spec" =~ ^([0-9]+)([smhd]?)$ ]] || return 1
+  n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
+  [[ "$n" -gt 0 ]] || return 1
+  case "$unit" in
+    ''|s) printf '%s' "$n" ;;
+    m)    printf '%s' "$((n * 60))" ;;
+    h)    printf '%s' "$((n * 3600))" ;;
+    d)    printf '%s' "$((n * 86400))" ;;
+  esac
+}
+
+# epoch_to_rfc3339: format an epoch as the UTC RFC3339 instant Cloudflare's
+# expires_on field takes. BSD date (macOS) reads the epoch with -r; GNU date
+# with -d @ — try both so the tool runs on either.
+epoch_to_rfc3339(){
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
 # ── permission-level normalisation ────────────────────────────────────────────
 # Operators name a permission as "Name:Level". Edit (the human word) maps to the
 # permission group's "Write" variant; Read maps to "Read". "Write" is accepted as
@@ -375,8 +490,12 @@ revoke_token(){
   fi
 
   hdr "revoke token id '$REVOKE_ID'"
+  # cf_ok runs inside a command substitution here, so its exit only ends the
+  # subshell — the assignment's status must be checked, or a DELETE Cloudflare
+  # refused would fall through to the success line below and report a token
+  # deleted that is still standing.
   local resp del_id
-  resp="$(cf_ok "revoke token $REVOKE_ID" DELETE "user/tokens/$REVOKE_ID")"
+  resp="$(cf_ok "revoke token $REVOKE_ID" DELETE "user/tokens/$REVOKE_ID")" || exit 1
   del_id="$(jq -r '.result.id // empty' <<<"$resp")"
   pass "deleted token id ${del_id:-$REVOKE_ID}"
 }
@@ -425,8 +544,11 @@ burn_token(){
 
   # Step 2: delete it with the MINTER (the burn token cannot be assumed able to
   # delete itself; deletion requires User API Tokens:Edit, which the minter holds).
+  # cf_ok runs inside a command substitution, so its exit only ends the subshell —
+  # the assignment's status must be checked, or a refused DELETE would report the
+  # token burned while it is still live.
   local dresp del_id
-  dresp="$(cf_ok "burn token $burn_id" DELETE "user/tokens/$burn_id")"
+  dresp="$(cf_ok "burn token $burn_id" DELETE "user/tokens/$burn_id")" || exit 1
   del_id="$(jq -r '.result.id // empty' <<<"$dresp")"
   pass "burned token id ${del_id:-$burn_id}"
 }
@@ -440,9 +562,26 @@ mint_token(){
   local p
   for p in "${PERMS[@]}"; do split_perm "$p"; done
 
-  # --vault-secret needs a vault to write to.
+  # Validate the TTL format before any network call (offline precondition). The
+  # actual expires_on instant is computed at POST time, not here, so a slow
+  # permission-group resolution cannot eat into the requested lifetime.
+  if [[ -n "$TTL" ]]; then
+    TTL_SECONDS="$(ttl_to_seconds "$TTL")" \
+      || die "malformed --ttl '$TTL' — want a positive duration: <n>[s|m|h|d] (e.g. 30m, 1h, 3600)"
+  fi
+
+  # Suppressing the value box is only safe when the value has somewhere else to
+  # land. Cloudflare shows a token value exactly once; a mint that neither prints
+  # nor stores it creates a live credential nobody can ever use or (by value)
+  # burn — an orphan by construction. Caught before any network call.
+  if [[ "$PRINT_VALUE" -eq 0 && -z "$VAULT_SECRET" && -z "$VALUE_FILE" ]]; then
+    die "--no-print-value needs --vault-secret or --value-file: with neither a printed value nor a stored one, the minted token would be created and immediately unrecoverable"
+  fi
+
+  # --vault-secret needs a vault to write to: --vault-name, else OPS_VAULT_NAME.
   if [[ -n "$VAULT_SECRET" ]]; then
-    [[ -n "${OPS_VAULT_NAME:-}" ]] || die "--vault-secret '$VAULT_SECRET' needs OPS_VAULT_NAME set"
+    [[ -n "$VAULT_NAME" ]] || VAULT_NAME="${OPS_VAULT_NAME:-}"
+    [[ -n "$VAULT_NAME" ]] || die "--vault-secret '$VAULT_SECRET' needs a vault to write to: pass --vault-name, or set OPS_VAULT_NAME"
     if [[ "$DRY_RUN" -ne 1 ]]; then
       command -v az >/dev/null 2>&1 || die "az CLI not found (needed for --vault-secret)"
     fi
@@ -473,12 +612,20 @@ mint_dry_run(){
     fi
   done
 
-  # Zones -> placeholder zone resources.
+  # Zones -> placeholder zone resources. A --zone-id needs no lookup, so it
+  # renders as the real resource key it will send.
   local zone_res='{}' z
   if [[ ${#ZONES[@]} -gt 0 ]]; then
     for z in "${ZONES[@]}"; do
       info "would resolve zone: $z  ->  GET /zones?name=$z  ->  its zone id"
       zone_res="$(jq -c --arg k "com.cloudflare.api.account.zone.<zone-id: $z>" \
+        '. + {($k): "*"}' <<<"$zone_res")"
+    done
+  fi
+  if [[ ${#ZONE_IDS[@]} -gt 0 ]]; then
+    for z in "${ZONE_IDS[@]}"; do
+      info "zone id given directly (no lookup): $z"
+      zone_res="$(jq -c --arg k "com.cloudflare.api.account.zone.$z" \
         '. + {($k): "*"}' <<<"$zone_res")"
     done
   fi
@@ -491,13 +638,17 @@ mint_dry_run(){
   fi
 
   # Guard the same way the live path does: zone-scoped perms need at least one zone.
-  if [[ "$zone_pg" != "[]" && ${#ZONES[@]} -eq 0 ]]; then
+  if [[ "$zone_pg" != "[]" && ${#ZONES[@]} -eq 0 && ${#ZONE_IDS[@]} -eq 0 ]]; then
     warn "zone-scoped permissions were requested but no --zone was given —"
     warn "the live run would refuse (a zone policy needs at least one zone)."
   fi
 
-  local body
-  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res")"
+  local body expires=""
+  if [[ -n "$TTL_SECONDS" ]]; then
+    expires="$(epoch_to_rfc3339 "$(( $(date -u +%s) + TTL_SECONDS ))")"
+    info "would set an expiry (--ttl $TTL): expires_on ≈ $expires (recomputed at POST time on a real run)"
+  fi
+  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires")"
 
   hdr "policy JSON that WOULD be sent"
   jq . <<<"$body"
@@ -508,8 +659,14 @@ mint_dry_run(){
   info "would then VERIFY the minted token authenticates: GET user/tokens/verify"
   info "  authenticated AS the new token (header only, never shown), retried through"
   info "  the token-propagation window. If it does not verify: nothing stored, exit 1."
+  if [[ "$PRINT_VALUE" -eq 0 ]]; then
+    info "the value box is SUPPRESSED (--no-print-value) — the store(s) below are the only copy"
+  fi
+  if [[ -n "$VALUE_FILE" ]]; then
+    info "only after verify passes: write the value to '$VALUE_FILE' (created mode 0600, value never printed)"
+  fi
   if [[ -n "$VAULT_SECRET" ]]; then
-    info "only after verify passes: az keyvault secret set --vault-name $OPS_VAULT_NAME --name $VAULT_SECRET --value <token> (value never printed)"
+    info "only after verify passes: az keyvault secret set --vault-name $VAULT_NAME --name $VAULT_SECRET --value <token> (value never printed)"
   fi
   hdr "dry run complete — no token was created"
 }
@@ -518,8 +675,10 @@ mint_dry_run(){
 # when there are zone-scoped groups and an account policy when there are
 # account-scoped groups — either, both, or (degenerate) neither. Shared by the
 # dry-run (placeholder ids) and live (real ids) paths so they can never drift.
+# The 6th arg is the optional expires_on instant (--ttl); empty omits the field,
+# so a mint without a TTL sends exactly the body it always sent.
 build_body(){
-  local name="$1" zpg="$2" zres="$3" apg="$4" ares="$5"
+  local name="$1" zpg="$2" zres="$3" apg="$4" ares="$5" expires="${6:-}"
   local policies='[]'
   if [[ "$zpg" != "[]" ]]; then
     policies="$(jq -c --argjson pg "$zpg" --argjson res "$zres" \
@@ -529,11 +688,36 @@ build_body(){
     policies="$(jq -c --argjson pg "$apg" --argjson res "$ares" \
       '. + [{effect:"allow", permission_groups:$pg, resources:$res}]' <<<"$policies")"
   fi
-  jq -nc --arg n "$name" --argjson p "$policies" '{name:$n, policies:$p}'
+  jq -nc --arg n "$name" --argjson p "$policies" --arg e "$expires" \
+    '{name:$n, policies:$p} + (if $e == "" then {} else {expires_on:$e} end)'
 }
 
 mint_live(){
   hdr "mint token '$NAME'"
+
+  # 0. Vault-store preflight — prove the vault will take the write BEFORE a live
+  #    token exists. The way this has actually failed is a lapsed role activation
+  #    on the vault: the mint succeeded, the store was refused, and the live token
+  #    was orphaned. A read of the target secret exercises the same auth path
+  #    (a lapsed activation refuses reads and writes alike), so it catches that
+  #    class here, while there is still nothing to orphan. It is a READ probe, so
+  #    a write-only denial can still slip through — which is why the store below
+  #    also prints its real error when it fails.
+  if [[ -n "$VAULT_SECRET" ]]; then
+    local pre_err
+    if ! pre_err=$(az keyvault secret show --vault-name "$VAULT_NAME" \
+           --name "$VAULT_SECRET" --output none 2>&1); then
+      if [[ "$pre_err" == *SecretNotFound* ]]; then
+        pass "vault preflight: '$VAULT_NAME' reachable ('$VAULT_SECRET' does not exist yet — the store will create it)"
+      else
+        fail "vault preflight FAILED for vault '$VAULT_NAME' secret '$VAULT_SECRET' — refusing to mint while the store would fail:"
+        fail "  ${pre_err:-<no error output>}"
+        die "fix vault access first (activate the vault role / check the vault name) — no token was created" 1
+      fi
+    else
+      pass "vault preflight: '$VAULT_NAME'/'$VAULT_SECRET' readable — the store below will write a new version"
+    fi
+  fi
 
   # 1. Fetch the permission-group catalogue once and resolve each requested perm.
   local pg_all
@@ -575,17 +759,24 @@ mint_live(){
   done
 
   # 2. Zone-scoped perms require at least one zone; resolve each zone name -> id.
+  #    A --zone-id is already the id and is used as given (no lookup, so nothing
+  #    between the caller's authoritative zone and the policy this token carries).
   local zone_res='{}' z zid
   if [[ "$zone_pg" != "[]" ]]; then
-    [[ ${#ZONES[@]} -gt 0 ]] || die "zone-scoped permissions were requested but no --zone was given"
-    for z in "${ZONES[@]}"; do
+    [[ ${#ZONES[@]} -gt 0 || ${#ZONE_IDS[@]} -gt 0 ]] \
+      || die "zone-scoped permissions were requested but no --zone/--zone-id was given"
+    for z in "${ZONES[@]+"${ZONES[@]}"}"; do
       zid="$(cf_ok "resolve zone $z" GET "zones?name=$z" | jq -r '.result[0].id // empty')"
       [[ -n "$zid" ]] || die "zone '$z' not found (is the minter authorised for it?)" 1
       zone_res="$(jq -c --arg k "com.cloudflare.api.account.zone.$zid" '. + {($k): "*"}' <<<"$zone_res")"
       pass "resolved zone $z  ->  $zid"
     done
-  elif [[ ${#ZONES[@]} -gt 0 ]]; then
-    warn "--zone was given but no zone-scoped permissions were requested — zones ignored"
+    for z in "${ZONE_IDS[@]+"${ZONE_IDS[@]}"}"; do
+      zone_res="$(jq -c --arg k "com.cloudflare.api.account.zone.$z" '. + {($k): "*"}' <<<"$zone_res")"
+      pass "zone id used as given (no lookup): $z"
+    done
+  elif [[ ${#ZONES[@]} -gt 0 || ${#ZONE_IDS[@]} -gt 0 ]]; then
+    warn "--zone/--zone-id was given but no zone-scoped permissions were requested — zones ignored"
   fi
 
   # 3. Account resource (only when account-scoped perms are present).
@@ -604,9 +795,14 @@ mint_live(){
     pass "account-scoped policy targets account $acct_id"
   fi
 
-  # 4. Build and POST the token.
-  local body result token token_id
-  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res")"
+  # 4. Build and POST the token. The expiry (--ttl) is computed HERE — now + TTL
+  #    at the moment of the POST — so the token's lifetime starts when it exists,
+  #    not when this process did.
+  local body result token token_id expires=""
+  if [[ -n "$TTL_SECONDS" ]]; then
+    expires="$(epoch_to_rfc3339 "$(( $(date -u +%s) + TTL_SECONDS ))")"
+  fi
+  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires")"
   result="$(cf_ok "create token" POST "user/tokens" "$body")"
   token="$(jq -r '.result.value // empty' <<<"$result")"
   token_id="$(jq -r '.result.id // empty' <<<"$result")"
@@ -626,7 +822,15 @@ mint_live(){
     printf '\n%s============ NEW TOKEN — FAILED VERIFICATION ==============%s\n' "$R" "$Z"
     printf '  name:  %s\n' "$NAME"
     printf '  id:    %s\n' "$token_id"
-    printf '  value: %s\n' "$token"
+    # The value is shown here because a created token can never be re-fetched and
+    # the operator may need it — except when the caller asked for no value in its
+    # log at all. The id above is what --revoke takes, so the cleanup path holds
+    # either way.
+    if [[ "$PRINT_VALUE" -eq 1 ]]; then
+      printf '  value: %s\n' "$token"
+    else
+      printf '  value: (suppressed by --no-print-value — clean it up by the id above)\n'
+    fi
     printf '%s  This token was created but does NOT authenticate. Do not use or%s\n' "$R" "$Z"
     printf '%s  store it. Clean it up:  --revoke %s%s\n' "$R" "$token_id" "$Z"
     printf '%s===========================================================%s\n' "$R" "$Z"
@@ -635,32 +839,108 @@ mint_live(){
     die "minted token failed verification — nothing was stored" 1
   fi
 
-  # 6. Emit the value ONCE, boxed. This is the only place a good token is printed.
-  printf '\n%s================= NEW CLOUDFLARE API TOKEN =================%s\n' "$G" "$Z"
-  printf '  name:  %s\n' "$NAME"
-  printf '  id:    %s\n' "$token_id"
-  printf '  value: %s\n' "$token"
-  printf '%s  STORE THIS NOW. Cloudflare shows a token value exactly ONCE —%s\n' "$Y" "$Z"
-  printf '%s  it cannot be retrieved again. If lost, roll a new one and delete this.%s\n' "$Y" "$Z"
-  printf '%s===========================================================%s\n' "$G" "$Z"
+  # 6. Emit the value ONCE, boxed. This is the only place a good token is printed
+  #    — and --no-print-value turns even that off, for a caller whose stdout is a
+  #    run log rather than an operator's eyes. The vault write below is then the
+  #    only copy, which is why that flag requires --vault-secret.
+  if [[ "$PRINT_VALUE" -eq 1 ]]; then
+    printf '\n%s================= NEW CLOUDFLARE API TOKEN =================%s\n' "$G" "$Z"
+    printf '  name:  %s\n' "$NAME"
+    printf '  id:    %s\n' "$token_id"
+    printf '  value: %s\n' "$token"
+    printf '%s  STORE THIS NOW. Cloudflare shows a token value exactly ONCE —%s\n' "$Y" "$Z"
+    printf '%s  it cannot be retrieved again. If lost, roll a new one and delete this.%s\n' "$Y" "$Z"
+    printf '%s===========================================================%s\n' "$G" "$Z"
+  else
+    pass "minted token '$NAME' (id $token_id) — value NOT printed (--no-print-value); it lands only in the store(s) named by --value-file/--vault-secret"
+  fi
+  [[ -n "$expires" ]] && info "the token expires on its own at $expires (--ttl $TTL) — Cloudflare refuses it past that moment even if it is never burned"
+
+  # 6b. Optional: write the value to a file (--value-file), mode 0600, reached
+  #     only after the verify gate — same rule as the vault: an unverified value
+  #     is never stored anywhere. This is the machine-readable handle for a
+  #     wrapping tool (mint, hand the value to a command, burn) that must not
+  #     scrape the printed box.
+  local value_file_written=0
+  if [[ -n "$VALUE_FILE" ]]; then
+    if (umask 077; printf '%s' "$token" > "$VALUE_FILE") 2>/dev/null; then
+      chmod 600 "$VALUE_FILE" 2>/dev/null || true
+      value_file_written=1
+      pass "value written to '$VALUE_FILE' (mode 0600, value not printed)"
+    else
+      fail "could not write the value file '$VALUE_FILE'"
+      if [[ "$PRINT_VALUE" -eq 0 && -z "$VAULT_SECRET" ]]; then
+        # No printed value, no vault write coming: the file was the only copy.
+        fail "the value was not printed (--no-print-value) and no vault write is configured — the minted token is now UNRECOVERABLE. It is live at Cloudflare; revoke it: --revoke $token_id"
+        exit 1
+      fi
+      warn "the token is verified and valid — it survives in the printed box and/or the vault write below; fix the file path if a wrapper needs it"
+    fi
+  fi
 
   # 7. Optional: land it in the ops vault (value passed to az, never printed).
   #    Reached only after the verify gate above, so an existing working secret
   #    is never replaced by a value Cloudflare has not confirmed.
   if [[ -n "$VAULT_SECRET" ]]; then
     hdr "store into the ops vault"
-    if az keyvault secret set --vault-name "$OPS_VAULT_NAME" --name "$VAULT_SECRET" \
-         --value "$token" --output none 2>/dev/null; then
-      pass "stored in vault '$OPS_VAULT_NAME' as secret '$VAULT_SECRET' (value not printed)"
+    # Capture the store's stderr so a refusal names its cause (an RBAC denial, a
+    # lapsed activation, a wrong vault name) instead of eating it — the eaten
+    # error is exactly how this failure once cost a live instrument-the-path
+    # session to diagnose. The token value is scrubbed from the captured text
+    # before printing, so the one-print rule above still holds.
+    local store_err=""
+    if store_err=$(az keyvault secret set --vault-name "$VAULT_NAME" --name "$VAULT_SECRET" \
+         --value "$token" --output none 2>&1); then
+      pass "stored in vault '$VAULT_NAME' as secret '$VAULT_SECRET' (value not printed)"
     else
-      warn "vault store FAILED — the token above is verified and valid; store it manually"
+      store_err="${store_err//"$token"/<redacted>}"
+      fail "vault store FAILED: ${store_err:-<no error output>}"
+      if [[ "$PRINT_VALUE" -eq 1 ]]; then
+        warn "the token above is verified and valid; store it manually"
+      elif [[ "$value_file_written" -eq 1 ]]; then
+        warn "the token is verified and valid; its only surviving copy is the value file '$VALUE_FILE' — store it from there"
+      else
+        # No printed value and no vault write: the value is gone the moment this
+        # process exits. Say so plainly and name the only remaining handle on it —
+        # its id — so a live credential nobody holds does not just linger.
+        fail "the value was not printed (--no-print-value) — the minted token is now UNRECOVERABLE. It is live at Cloudflare; revoke it: --revoke $token_id"
+      fi
       exit 1
     fi
   fi
 }
 
+# ── QUALIFY mode (measure, never label) ───────────────────────────────────────
+# A credential is a minter iff it can READ the permission-group catalogue —
+# GET /user/tokens/permission_groups answering success. That call is the same one
+# a mint makes first, so a credential that passes here can begin a mint, and one
+# that fails here fails by name now instead of half way through a mint. Nothing
+# about the credential's NAME, vault key, or dashboard label is consulted: a token
+# called "the minter" that cannot read this catalogue is not a minter.
+qualify_minter(){
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    hdr "dry run — qualify the minter (no network calls)"
+    info "would measure the credential with this read, and qualify it only if it succeeds:"
+    cf GET "user/tokens/permission_groups"
+    hdr "dry run complete — nothing was measured"
+    return 0
+  fi
+  hdr "qualify the minter credential (measured, not labelled)"
+  local resp n
+  resp="$(cf GET "user/tokens/permission_groups")" || \
+    die "the permission-group read did not complete (curl failed; its error is above) — the credential is NOT qualified as a minter" 1
+  if [[ "$(jq -r '.success // false' <<<"$resp" 2>/dev/null)" != "true" ]]; then
+    fail "Cloudflare refused the permission-group read; its error body follows verbatim:"
+    printf '%s\n' "$resp" >&2
+    die "this credential canNOT mint: GET /user/tokens/permission_groups did not succeed. A minter needs \"User API Tokens:Edit\"; a credential with any amount of DNS/zone reach but not that group will fail here every time, whatever it is named." 1
+  fi
+  n="$(jq -r '.result | length' <<<"$resp")"
+  pass "qualified: the credential read $n permission groups — it can create and delete tokens"
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 case "$MODE" in
+  qualify) qualify_minter ;;
   list)   list_tokens ;;
   mint)   mint_token ;;
   revoke) revoke_token ;;

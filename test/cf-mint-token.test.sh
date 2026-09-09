@@ -22,7 +22,7 @@
 # fabricated token values appear anywhere. The propagation-retry path is
 # exercised with one stubbed 401 (costs one 5s backoff sleep).
 #
-# Run:  bash infra/test/cf-mint-token.test.sh   (exit 0 = all pass)
+# Run:  bash test/cf-mint-token.test.sh   (exit 0 = all pass)
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,17 +51,20 @@ printf '%s' "$FAKE_TOKEN" >"$STUB_DIR/token.txt"
 cat >"$STUB_DIR/curl" <<'STUB'
 #!/usr/bin/env bash
 set -u
-url=""; method="GET"; auth=""; wfmt=0
+url=""; method="GET"; auth=""; wfmt=0; data=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     -X) method="${args[$((i+1))]}" ;;
     -H) case "${args[$((i+1))]}" in Authorization:*) auth="${args[$((i+1))]#Authorization: Bearer }" ;; esac ;;
     -w) wfmt=1 ;;
+    --data) data="${args[$((i+1))]}" ;;
     https://*) url="${args[$i]}" ;;
   esac
 done
-printf 'curl %s %s auth=%s\n' "$method" "$url" "$auth" >>"$STUB_DIR/calls.log"
+# The request BODY is logged too: the token's policy (which permission groups, on
+# which resources) is the whole point of a mint, and it is only visible here.
+printf 'curl %s %s auth=%s body=%s\n' "$method" "$url" "$auth" "$data" >>"$STUB_DIR/calls.log"
 tok="$(cat "$STUB_DIR/token.txt")"
 code=200 body=""
 case "$method $url" in
@@ -71,17 +74,31 @@ case "$method $url" in
     line="$(sed -n "$((n+1))p" "$STUB_DIR/verify.plan")"
     [[ -n "$line" ]] || line="$(tail -1 "$STUB_DIR/verify.plan")"
     code="${line%% *}"
-    if [[ "${line##* }" == "ok" ]]; then
-      body='{"success":true,"errors":[],"result":{"id":"tok-0001","status":"active"}}'
-    else
-      body='{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}],"result":null}'
-    fi ;;
+    case "${line##* }" in
+      ok)
+        body='{"success":true,"errors":[],"result":{"id":"tok-0001","status":"active"}}' ;;
+      prop)
+        # The real propagation transient: code 10000 — the ONLY 401 the retry lib
+        # rides. (code 1000 = genuinely invalid, refused on the first attempt.)
+        body='{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"result":null}' ;;
+      *)
+        body='{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}],"result":null}' ;;
+    esac ;;
   "GET "*"/user/tokens/permission_groups")
-    body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]}]}' ;;
+    if [[ -f "$STUB_DIR/pg.deny" ]]; then
+      code=403
+      body='{"success":false,"errors":[{"code":9109,"message":"Unauthorized to access requested resource"}],"result":null}'
+    else
+      body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]}]}'
+    fi ;;
   "GET "*"/zones?name="*)
     body='{"success":true,"errors":[],"result":[{"id":"zone-abc-123"}]}' ;;
   "DELETE "*"/user/tokens/"*)
-    body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"${url##*/}\"}}" ;;
+    if [[ -f "$STUB_DIR/delete.fail" ]]; then
+      body='{"success":false,"errors":[{"code":7000,"message":"stub: delete refused"}]}'
+    else
+      body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"${url##*/}\"}}"
+    fi ;;
   "POST "*"/user/tokens")
     body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"tok-0001\",\"name\":\"t\",\"value\":\"$tok\"}}" ;;
   "GET "*"/user/tokens")
@@ -156,6 +173,25 @@ run_mint "$OUT" --revoke tok-dead-beef; rc=$?
 if [[ "$rc" -eq 0 ]]; then ok "--revoke <id> with a real id succeeds against the stub"; else bad "--revoke <id>: want exit 0, got $rc"; fi
 if grep -q "curl DELETE .*user/tokens/tok-dead-beef" "$CALLS"; then ok "revoke DELETEs exactly the given id"; else bad "revoke did not DELETE the given id"; fi
 
+# A DELETE Cloudflare refuses must be a failure, not a success report: cf_ok runs
+# in a command substitution on the delete paths, so its exit alone only ends the
+# subshell — the regression here was "deleted/burned" printed for a token still
+# standing.
+touch "$STUB_DIR/delete.fail"
+run_mint "$OUT" --revoke tok-dead-beef; rc=$?
+if [[ "$rc" -eq 1 ]] && ! grep -q "deleted token id" "$OUT"; then
+  ok "a refused DELETE fails --revoke (no phantom 'deleted' report)"
+else bad "a refused revoke was reported as success: exit $rc — $(tail -3 "$OUT")"; fi
+echo "200 ok" >"$STUB_DIR/verify.plan"
+: >"$CALLS"; rm -f "$STUB_DIR/verify.count"
+PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" CF_BURN_TOKEN="$FAKE_TOKEN" \
+  bash "$SCRIPT" --burn >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 1 ]] && ! grep -q "burned token id" "$OUT"; then
+  ok "a refused DELETE fails --burn (a live token is never reported burned)"
+else bad "a refused burn was reported as success: exit $rc — $(tail -3 "$OUT")"; fi
+rm -f "$STUB_DIR/delete.fail"
+echo "500 bad" >"$STUB_DIR/verify.plan"
+
 # ── 2. mint: verify gate + vault ordering + byte-exact store ──────────────────
 echo "mint (verify-before-vault):"
 
@@ -193,11 +229,19 @@ if grep -q "FAILED VERIFICATION" "$OUT"; then ok "verify failure is reported lou
 if grep -q -- "--revoke tok-0001" "$OUT"; then ok "failure output names the cleanup command with the token id"; else bad "failure output lacks the revoke hint"; fi
 if grep -q "\[1000\]" "$OUT"; then ok "Cloudflare's error code is surfaced"; else bad "CF error code not surfaced"; fi
 
-# One transient 401 (propagation window), then active: must ride the retry and pass.
-printf '401 bad\n200 ok\n' >"$STUB_DIR/verify.plan"
+# One transient 401 (propagation window, code 10000), then active: must ride the
+# retry and pass.
+printf '401 prop\n200 ok\n' >"$STUB_DIR/verify.plan"
 run_mint "$OUT" --name t --perm DNS:Edit --zone example.test; rc=$?
 if [[ "$rc" -eq 0 ]]; then ok "verify rides one propagation 401 and succeeds (retry lib engaged)"; else bad "verify did not survive a transient 401: exit $rc"; fi
 if [[ "$(cat "$STUB_DIR/verify.count")" -eq 2 ]]; then ok "verify was attempted exactly twice (401 then active)"; else bad "unexpected verify attempt count: $(cat "$STUB_DIR/verify.count")"; fi
+
+# A genuinely-invalid token (401 code 1000) must FAIL on the first attempt — no
+# propagation window to wait out, no retry budget burned.
+printf '401 bad\n' >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone example.test; rc=$?
+if [[ "$rc" -eq 1 ]]; then ok "invalid token (code 1000) fails verify"; else bad "invalid-token verify: want exit 1, got $rc"; fi
+if [[ "$(cat "$STUB_DIR/verify.count")" -eq 1 ]]; then ok "refused on the FIRST attempt (no ~110s budget burn)"; else bad "invalid token retried: $(cat "$STUB_DIR/verify.count") attempts"; fi
 
 # ── 3. dry-run stays offline and states the verify plan ───────────────────────
 echo "dry-run:"
@@ -210,6 +254,205 @@ if grep -q "only after verify passes" "$OUT"; then ok "dry-run plan states the v
 
 run_mint "$OUT" --dry-run --revoke tok-dead-beef; rc=$?
 if [[ "$rc" -eq 0 && ! -s "$CALLS" ]]; then ok "revoke --dry-run exits 0 with no calls"; else bad "revoke --dry-run: exit $rc, calls: $(cat "$CALLS")"; fi
+
+# ── 4. --zone-id: scope by the id itself, no name lookup ──────────────────────
+# An automated caller holds the zone ID as its authoritative value (it is what its
+# terraform writes with). Resolving a NAME to an id in between is a second
+# derivation that could aim the token at a different zone than the caller uses.
+echo "--zone-id (scope without a name lookup):"
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "--zone-id mint exits 0"; else bad "--zone-id mint: want exit 0, got $rc — $(tail -5 "$OUT")"; fi
+if ! grep -q "curl GET .*zones?name=" "$CALLS"; then ok "no zone-name lookup is made"; else bad "--zone-id still resolved a name: $(grep 'zones?name' "$CALLS")"; fi
+POST_BODY="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | sed 's/^.*body=//')"
+if grep -q '"com.cloudflare.api.account.zone.zone-xyz-777":"\*"' <<<"$POST_BODY"; then
+  ok "the policy resource is the given zone id, verbatim"
+else bad "policy did not carry the given zone id: $POST_BODY"; fi
+if [[ "$(jq '.policies | length' <<<"$POST_BODY")" -eq 1 ]] \
+   && [[ "$(jq -r '.policies[0].resources | keys[]' <<<"$POST_BODY")" == "com.cloudflare.api.account.zone.zone-xyz-777" ]]; then
+  ok "exactly ONE policy, one resource — no account-wide scope rides along"
+else bad "policy shape is wider than the one zone: $POST_BODY"; fi
+
+run_mint "$OUT" --name t --perm DNS:Edit --vault-secret cf-token; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "no --zone/--zone-id was given" "$OUT"; then
+  ok "a zone-scoped perm with neither --zone nor --zone-id is refused"
+else bad "unscoped zone perm was accepted: exit $rc — $(tail -3 "$OUT")"; fi
+
+run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]]; then ok "--zone-id --dry-run stays offline"; else bad "--zone-id dry-run: exit $rc, calls: $(cat "$CALLS")"; fi
+if grep -q "com.cloudflare.api.account.zone.zone-xyz-777" "$OUT"; then ok "dry-run renders the real zone resource (no placeholder)"; else bad "dry-run zone resource wrong: $(grep zone "$OUT" | head -3)"; fi
+
+# ── 5. --no-print-value: the vault is the only copy ───────────────────────────
+# An unattended caller's stdout is a run log. A token value printed there outlives
+# the run in whatever captured it, so the box is suppressible — but only when the
+# value has somewhere else to land, or it would be created and lost at once.
+echo "--no-print-value (unattended callers):"
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "--no-print-value mint exits 0"; else bad "--no-print-value mint: want exit 0, got $rc — $(tail -5 "$OUT")"; fi
+if ! grep -qF "$FAKE_TOKEN" "$OUT"; then ok "the minted value appears NOWHERE in the output"; else bad "the token value leaked into stdout"; fi
+if grep -q -- "--value $FAKE_TOKEN" "$CALLS"; then ok "…but it still reaches the vault byte-exactly"; else bad "vault write lost the value: $(grep '^az' "$CALLS")"; fi
+if grep -q "tok-0001" "$OUT"; then ok "the token id is still reported (the handle for a revoke)"; else bad "no token id in the output"; fi
+
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --no-print-value; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q -- "--no-print-value needs --vault-secret" "$OUT"; then
+  ok "--no-print-value without --vault-secret is a usage error (would create-and-lose a token)"
+else bad "unsafe --no-print-value accepted: exit $rc — $(tail -3 "$OUT")"; fi
+if [[ ! -s "$CALLS" ]]; then ok "…refused before any network call (no token was created)"; else bad "it minted before the guard: $(cat "$CALLS")"; fi
+
+# Verify failure with the box suppressed: still no value, still the id to clean up.
+echo "200 bad" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 1 ]]; then ok "verify failure under --no-print-value exits 1"; else bad "want exit 1, got $rc"; fi
+if ! grep -qF "$FAKE_TOKEN" "$OUT"; then ok "the failed token's value is not printed either"; else bad "the value leaked on the failure path"; fi
+if grep -q -- "--revoke tok-0001" "$OUT"; then ok "the failure still names the id to revoke"; else bad "no cleanup handle on the failure path"; fi
+
+# ── which vault the minted value is WRITTEN to ────────────────────────────────
+# The fleet keeps two vaults and this tool touches both, in different roles: it
+# READS the minter from the ops vault (fleet-shared, per-secret grant) and WRITES
+# the minted value wherever the caller says. For a credential minted and named per
+# instance that write target is the per-instance credential vault — writing it to
+# the ops vault instead would put it beside the break-glass signing key, which is
+# the exact escalation the vault split exists to prevent. So the target is an
+# explicit flag, and the two roles never share one variable.
+echo "the write target is chosen by --vault-name, independently of where the minter came from:"
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 \
+  --vault-secret cf-instance-acme-dns-token --vault-name inst-creds-kv --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "a mint with an explicit write vault succeeds"; else bad "want exit 0, got $rc — $(tail -3 "$OUT")"; fi
+if grep -q -- "secret set --vault-name inst-creds-kv --name cf-instance-acme-dns-token" "$CALLS"; then
+  ok "the value is written to the vault named by --vault-name"
+else bad "wrong write target: $(grep '^az' "$CALLS")"; fi
+if ! grep -q -- "secret set --vault-name fake-vault" "$CALLS"; then
+  ok "…and NOT to OPS_VAULT_NAME, even though the minter came from there"
+else bad "the write fell back to the ops vault: $(grep '^az' "$CALLS")"; fi
+
+# Omitted, the target defaults to the ops vault — right for a fleet-shared token
+# (cloudflare-token and friends are minted straight back into it).
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 \
+  --vault-secret cloudflare-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q -- "secret set --vault-name fake-vault --name cloudflare-token" "$CALLS"; then
+  ok "omitting --vault-name writes to OPS_VAULT_NAME (right for a fleet-shared credential)"
+else bad "the default write target changed: rc=$rc $(grep '^az' "$CALLS")"; fi
+
+# With neither a --vault-name nor an OPS_VAULT_NAME there is nowhere to put the
+# value: refuse before minting rather than create a token nobody can ever use.
+: >"$CALLS"; rm -f "$STUB_DIR/verify.count"
+PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" \
+  bash "$SCRIPT" --name t --perm DNS:Edit --zone-id zone-xyz-777 \
+  --vault-secret cf-instance-acme-dns-token --no-print-value >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "needs a vault to write to" "$OUT"; then
+  ok "no write target at all is a usage error, named as such"
+else bad "a mint with nowhere to store the value was accepted: rc=$rc $(tail -3 "$OUT")"; fi
+if [[ ! -s "$CALLS" ]]; then ok "…refused before any network call (no orphan token created)"; else bad "it minted before the guard: $(cat "$CALLS")"; fi
+
+# ── --ttl: the token carries its own expiry ───────────────────────────────────
+# The floor under the mint-use-burn pattern: a token whose burn never runs must
+# still die on its own, so the mint can state an expires_on. Format-checked
+# offline; the instant is computed at POST time.
+echo "--ttl (self-expiring tokens):"
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 30m; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "a mint with --ttl exits 0"; else bad "--ttl mint: want exit 0, got $rc — $(tail -5 "$OUT")"; fi
+POST_BODY="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | sed 's/^.*body=//')"
+EXP="$(jq -r '.expires_on // empty' <<<"$POST_BODY")"
+if [[ "$EXP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+  ok "the POST body carries an RFC3339 expires_on ($EXP)"
+else bad "no well-formed expires_on in the POST body: $POST_BODY"; fi
+
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777; rc=$?
+POST_BODY="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | sed 's/^.*body=//')"
+if [[ "$(jq 'has("expires_on")' <<<"$POST_BODY")" == "false" ]]; then
+  ok "a mint WITHOUT --ttl sends exactly the body it always sent (no expires_on)"
+else bad "expires_on leaked into a TTL-less mint: $POST_BODY"; fi
+
+run_guarded 5 "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 2fortnights; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "malformed --ttl" "$OUT"; then
+  ok "a malformed --ttl is a usage error, caught offline"
+else bad "malformed --ttl accepted: exit $rc — $(tail -3 "$OUT")"; fi
+if [[ ! -s "$CALLS" ]]; then ok "…before any network call"; else bad "a malformed TTL still reached the network: $(cat "$CALLS")"; fi
+
+run_guarded 5 "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 0; rc=$?
+if [[ "$rc" -eq 2 ]]; then ok "--ttl 0 is refused (a token born expired can only fail its own verify)"; else bad "--ttl 0 accepted: exit $rc"; fi
+
+run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 1h; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]]; then ok "--ttl --dry-run stays offline"; else bad "--ttl dry-run: exit $rc, calls: $(cat "$CALLS")"; fi
+if grep -q '"expires_on"' "$OUT"; then ok "…and the dry-run body shows the expiry it would send"; else bad "dry-run body lacks expires_on"; fi
+
+# ── --value-file: the machine-readable handle for a wrapping tool ─────────────
+# A wrapper that must hold the value (mint, run a command with it, burn it) gets
+# it from a file, not by scraping the printed box — written strictly AFTER the
+# verify gate, like the vault, and private by mode.
+echo "--value-file (programmatic value hand-off):"
+
+VFILE="$STUB_DIR/value-file"
+echo "200 ok" >"$STUB_DIR/verify.plan"
+rm -f "$VFILE"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --value-file "$VFILE" --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "--value-file --no-print-value mint exits 0 (the file is a valid landing place)"; else bad "value-file mint: want exit 0, got $rc — $(tail -5 "$OUT")"; fi
+if [[ "$(cat "$VFILE" 2>/dev/null)" == "$FAKE_TOKEN" ]]; then
+  ok "the file receives the token byte-exactly"
+else bad "value file content wrong: [$(cat "$VFILE" 2>/dev/null)]"; fi
+PERMS_OCTAL="$(stat -f '%Lp' "$VFILE" 2>/dev/null || stat -c '%a' "$VFILE" 2>/dev/null)"
+if [[ "$PERMS_OCTAL" == "600" ]]; then ok "…at mode 0600 (private to the minting user)"; else bad "value file mode is $PERMS_OCTAL, want 600"; fi
+if ! grep -qF "$FAKE_TOKEN" "$OUT"; then ok "…and the value still appears nowhere in the output"; else bad "the value leaked into stdout"; fi
+
+echo "200 bad" >"$STUB_DIR/verify.plan"
+rm -f "$VFILE"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --value-file "$VFILE" --no-print-value; rc=$?
+if [[ "$rc" -eq 1 ]]; then ok "verify failure with a value file exits 1"; else bad "want exit 1, got $rc"; fi
+if [[ ! -f "$VFILE" ]]; then
+  ok "…and the file is NEVER written (the verify gate guards every store, not just the vault)"
+else bad "an unverified value was written to the value file"; fi
+
+
+# ── the minter credential: measured, pluggable, never on argv ─────────────────
+echo "minter credential:"
+
+run_mint "$OUT" --qualify-minter; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "qualified:" "$OUT"; then ok "--qualify-minter passes a credential that CAN read the permission-group catalogue"; else bad "qualify: want exit 0, got $rc — $(tail -3 "$OUT")"; fi
+if grep -q 'permission_groups' "$CALLS"; then ok "…by MEASUREMENT (it makes the read), not by the credential's name"; else bad "qualify made no permission-group read"; fi
+
+touch "$STUB_DIR/pg.deny"
+run_mint "$OUT" --qualify-minter; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -q "canNOT mint" "$OUT"; then ok "a credential that cannot read the catalogue is refused as a minter"; else bad "qualify-deny: want exit 1, got $rc — $(tail -3 "$OUT")"; fi
+if grep -q "9109" "$OUT"; then ok "…with Cloudflare's own error body printed, not swallowed"; else bad "the API error body was swallowed"; fi
+run_mint "$OUT" --name t --perm DNS:Edit --zone example.test; rc=$?
+if [[ "$rc" -ne 0 ]] && ! grep -q '^curl POST' "$CALLS"; then ok "a mint on an unqualified credential fails at the catalogue read — no token is created"; else bad "a token was created on a credential that cannot mint"; fi
+rm -f "$STUB_DIR/pg.deny"
+
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN -u CF_MINTER_VAULT_SECRET -u OPS_VAULT_NAME \
+  bash "$SCRIPT" --qualify-minter >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "no minter credential" "$OUT"; then ok "no minter at all is a named refusal, exit 2"; else bad "missing minter: want exit 2, got $rc"; fi
+if grep -q -- "--minter-cmd" "$OUT" && grep -q "CF_MINTER_TOKEN" "$OUT" && [[ ! -s "$CALLS" ]]; then ok "…listing every supported way to supply one, before any network call"; else bad "the refusal does not name the alternatives"; fi
+
+printf '%s\n' "minter-from-a-store" >"$STUB_DIR/minter.txt"
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN \
+  bash "$SCRIPT" --minter-cmd "cat $STUB_DIR/minter.txt" --qualify-minter >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "--minter-cmd sources the minter from an arbitrary command"; else bad "--minter-cmd: want exit 0, got $rc — $(tail -3 "$OUT")"; fi
+if grep -q 'auth=minter-from-a-store' "$CALLS"; then ok "…and that value is what authenticates the call"; else bad "the fetched minter did not reach the API call: $(cat "$CALLS")"; fi
+if ! grep -q "minter-from-a-store" "$OUT"; then ok "…while never appearing in the output"; else bad "the minter value LEAKED into stdout"; fi
+
+: >"$CALLS"
+printf '%s\n' "minter-from-a-file" >"$STUB_DIR/minter2.txt"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN \
+  bash "$SCRIPT" --minter-token-file "$STUB_DIR/minter2.txt" --qualify-minter >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'auth=minter-from-a-file' "$CALLS"; then ok "--minter-token-file reads it from a private file"; else bad "--minter-token-file: exit $rc"; fi
+
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN \
+  bash "$SCRIPT" --minter-token-file "$STUB_DIR/does-not-exist" --qualify-minter >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "not readable" "$OUT"; then ok "a missing minter file refuses by name (it is not a silent fallback)"; else bad "missing minter file: want exit 2, got $rc"; fi
+
+run_mint "$OUT" --minter-token some-secret --qualify-minter; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "argv is world-readable" "$OUT"; then ok "--minter-token on argv is refused, with the reason"; else bad "--minter-token: want a named refusal, got $rc"; fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 echo
