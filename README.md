@@ -1,70 +1,181 @@
 # cf-minter
 
-Mint **scope-exact Cloudflare API tokens** declaratively — named permissions +
-named zones on the command line instead of clicking through the Cloudflare
-dashboard. Born in worksync's `infra/` (where it was built alongside the fleet
-hardening scripts), formalized here as its own project so every project can
-mint its deploy credentials the same way.
+**One command gets you a Cloudflare credential that exists only while your job
+runs.** Mint a scope-exact API token, hand it to a command, burn it on the way
+out — success, failure, or Ctrl-C alike.
 
-## What it does
+```bash
+export CF_MINTER_TOKEN=…            # a credential with "User API Tokens:Edit"
+./cf-scoped-run.sh --profile dns-edit --zone example.com -- ./publish-records.sh
+```
 
-- **Mint**: resolve human permission names (`DNS:Edit`, `Pages:Edit`, …) to Cloudflare permission-group UUIDs, resolve zone names to
-  zone ids, split zone- vs account-scoped permissions into the right policies,
-  `POST /user/tokens`, then **verify the minted token actually authenticates**
-  (as itself, retried through Cloudflare's ~2-minute propagation window)
-  before printing it once or storing it anywhere. An unverified value can
-  never replace a working credential.
-- **List**: `--list` shows existing tokens (id · status · name) so you don't
-  mint duplicates — every mint creates a *new* token; there is no upsert.
-- **Revoke / burn**: `--revoke <id>` deletes by id; `--burn` deletes by value
-  (from `CF_BURN_TOKEN`, env-only) — the full lifecycle for ephemeral tokens.
-- **Dry-run**: `--dry-run` prints the exact policy JSON and API calls it
-  *would* make, with zero network calls. No token value ever appears in
-  dry-run output, so it's safe to paste into runbooks.
+That mints a token carrying exactly `DNS:Edit` + `Zone:Read` on `example.com`,
+with a 15-minute expiry, runs `./publish-records.sh` with the value in
+`CLOUDFLARE_API_TOKEN` / `CF_SCOPED_TOKEN`, and deletes the token at Cloudflare
+before it returns. The value is never printed, never logged, never written
+anywhere but a 0600 temp file that does not outlive the mint.
+
+Start with `--dry-run` to see the exact plan (permissions, scope, TTL) with zero
+network calls, and `--list-profiles` to see what you can ask for.
+
+## The two tools
+
+| tool | what it owns |
+|---|---|
+| `cf-scoped-run.sh` | the **mint → use → burn** lifecycle, profiles, the burn trap, stale-token sweeping |
+| `cf-mint-token.sh` | the credential itself: resolve names to ids, mint, **verify**, store, list, revoke, burn |
+
+`cf-mint-token.sh` is unchanged as an entry point — every existing call site
+(`--name/--perm/--zone/--zone-id/--ttl/--value-file/--vault-secret/--list/--revoke/--burn/--dry-run`)
+works exactly as before. `cf-scoped-run.sh` is a wrapper over it, not a
+replacement: everything credential-shaped still happens in the mint tool.
+
+## cf-scoped-run.sh flags
+
+| flag | meaning |
+|---|---|
+| `--profile <name>` | a named purpose from `profiles.conf`: its permissions, its zone-vs-account rule, its default TTL |
+| `--zone <name>` | scope to this zone by name (resolved live to its id) — repeatable |
+| `--zone-id <id>` | scope to this zone by id, no lookup — for automation that already holds the id |
+| `--ttl <n>[s\|m\|h\|d]` | token lifetime; overrides the profile default. Cloudflare refuses the token past it even if the burn never runs |
+| `--slug <label>` | trailing label in the token name (defaults to the profile name) so a stale token says what it was for |
+| `--mint-only` | mint and print the value once, run nothing, do **not** burn — for hand-driven work. Only the TTL ends it |
+| `--minter-cmd <cmd>` | shell command that prints the minter token — the hook for your own secret store |
+| `--minter-token-file <p>` | read the minter from a file's first line |
+| `--perm <Name:Level>` | ad-hoc permission instead of a profile, repeatable (e.g. `--perm DNS:Edit`) |
+| `--dry-run` | print exactly what would be minted and run; no network calls, nothing created |
+| `--list-profiles` | print the profiles and their reach |
+| `--list-stale` | list `cfsr-*` tokens past the TTL their own name declares — i.e. runs whose burn failed. Exit 1 if any |
+| `--burn-stale` | revoke exactly those. Tokens not named `cfsr-*` are never touched |
+
+Exit code: the wrapped command's own — except **1** when the mint failed (the
+command never ran) or when the burn failed after a green command. A run that
+leaked a live credential is not a green run.
+
+## Profiles
+
+Profiles live in `profiles.conf`. That file is the only place a profile is
+defined; no code knows one by name.
+
+| profile | permissions | scope | ttl |
+|---|---|---|---|
+| `dns-edit` | `DNS:Edit`, `Zone:Read` | zone | 15m |
+| `dns-read` | `DNS:Read`, `Zone:Read` | zone | 15m |
+| `zone-settings` | `Zone Settings:Edit`, `Zone:Read` | zone | 15m |
+| `zone-harden` | `DNS:Edit`, `Zone Settings:Edit`, `Zone WAF:Edit`, `Firewall Services:Edit`, `SSL and Certificates:Edit`, `Analytics:Read` | zone | 30m |
+| `certs` | `SSL and Certificates:Edit` | zone | 15m |
+| `pages-deploy` | `Pages:Edit`, `Pages:Read` | account | 30m |
+| `workers-deploy` | `Workers Scripts:Edit` | account | 30m |
+
+A **zone** profile refuses to run without a `--zone`/`--zone-id`; an **account**
+profile refuses to be given one. Both would otherwise hand out reach nobody
+asked for.
+
+### Adding a profile
+
+One edit, no code:
+
+```
+profile: logs-read
+perm: Logs:Read
+perm: Zone:Read
+scope: zone
+ttl: 10m
+why: pull Logpush job state for one zone
+```
+
+Permission names are the human names from Cloudflare's token editor
+(`Name:Edit` / `Name:Read`); they are resolved to permission-group UUIDs by a
+**live catalogue read** at mint time, so nothing here goes stale silently — a
+name Cloudflare no longer uses fails the mint loudly, listing the groups that do
+exist. Point at a different file with `CF_PROFILES_FILE=/path/to/profiles.conf`.
 
 ## The minter credential
 
-Creating (and deleting) tokens is itself privileged: you need a credential
-carrying **User API Tokens:Edit** for the target account. It is read from
-`CF_MINTER_TOKEN` (env only — never an argument, never printed), or from an
-Azure Key Vault when `CF_MINTER_VAULT_SECRET` + `OPS_VAULT_NAME` are set.
-Multi-account users: pin the account with `CF_ACCOUNT_ID`.
+Creating and deleting tokens is itself privileged: you need a credential
+carrying **User API Tokens:Edit** (a normal scoped token can do neither).
+Resolved in this precedence, and never accepted as a command-line argument —
+argv is world-readable in `ps`:
 
-## Usage
+1. `CF_MINTER_TOKEN=<value>` in the environment
+2. `--minter-cmd '<command that prints the token>'` (or `CF_MINTER_CMD`)
+3. `--minter-token-file <path>`
+4. `CF_MINTER_VAULT_SECRET` + `OPS_VAULT_NAME` — an optional Azure Key Vault
+   convenience, using whatever vault and secret name you name
+
+### Wiring your own vault
+
+`--minter-cmd` is the seam: any command that prints the token on stdout.
 
 ```bash
-# See what exists (avoid duplicates):
-CF_MINTER_TOKEN=… ./cf-mint-token.sh --list
+# 1Password
+./cf-scoped-run.sh --minter-cmd 'op read op://Infra/cf-minter/credential' \
+  --profile dns-edit --zone example.com -- ./publish-records.sh
 
-# Preview a mint (no network calls):
-CF_MINTER_TOKEN=… ./cf-mint-token.sh --dry-run \
-  --name my-project-deploy --perm "Pages:Edit" --perm "Pages:Read"
+# HashiCorp Vault
+./cf-scoped-run.sh --minter-cmd 'vault kv get -field=token secret/cloudflare/minter' \
+  --profile certs --zone example.com -- ./issue-origin-cert.sh
 
-# Mint a Pages deploy token (account-scoped, no zones needed):
-CF_MINTER_TOKEN=… CF_ACCOUNT_ID=… ./cf-mint-token.sh \
-  --name my-project-deploy --perm "Pages:Edit" --perm "Pages:Read"
+# AWS Secrets Manager
+./cf-scoped-run.sh --minter-cmd 'aws secretsmanager get-secret-value --secret-id cf-minter --query SecretString --output text' \
+  --profile pages-deploy -- npx wrangler pages deploy ./dist
 
-# Mint a DNS token scoped to exactly two zones:
-CF_MINTER_TOKEN=… ./cf-mint-token.sh \
-  --name dns-updater --perm DNS:Edit --zone example.com --zone example.org
-
-# Rotate: mint the new one first, then revoke the old by id (see --list),
-# or burn it by value:
-CF_MINTER_TOKEN=… CF_BURN_TOKEN=… ./cf-mint-token.sh --burn
+# Azure Key Vault
+./cf-scoped-run.sh --minter-cmd 'az keyvault secret show --vault-name my-vault --name cf-minter-token --query value -o tsv' \
+  --profile zone-settings --zone example.com -- ./flip-tls-setting.sh
 ```
 
-Exit codes: `0` success · `1` a step failed (API/curl/vault) · `2` usage or
-precondition.
+If the fetch command fails, the run fails and says so with the command's own
+error — it is never treated as "no token configured".
 
-## Layout
+### Is this credential actually a minter?
 
-- `cf-mint-token.sh` — the tool (mint / list / revoke / burn / dry-run).
-- `lib/cf-retry.sh` — retries only Cloudflare's token-propagation transient
-  (401 / error code 10000); real permission errors fail immediately.
-- `test/cf-mint-token.test.sh` — hermetic tests (curl/az are PATH stubs):
-  argument guards + the verify-before-store gate. Run: `bash test/cf-mint-token.test.sh`.
+Ask by measurement, never by what it is named:
+
+```bash
+CF_MINTER_TOKEN=… ./cf-mint-token.sh --qualify-minter
+```
+
+A credential qualifies iff `GET /user/tokens/permission_groups` succeeds. A
+token with plenty of DNS or zone reach but not that group fails here — and would
+have failed halfway through a mint instead.
+
+## What the wrapped command sees
+
+`CLOUDFLARE_API_TOKEN` and `CF_SCOPED_TOKEN`, both set to the minted value, in
+the environment only. Nothing else changes. A command that already reads
+`CLOUDFLARE_API_TOKEN` (wrangler, terraform's Cloudflare provider, flarectl,
+most `curl` snippets) needs no adaptation at all.
+
+## When a burn fails
+
+The burn is owed on every exit path, but the network can refuse. When it does,
+the run says so loudly with the token's name and exits non-zero — and the token
+is still bounded by its TTL. Sweep the residue afterwards:
+
+```bash
+./cf-scoped-run.sh --list-stale     # exit 1 if any run's burn failed
+./cf-scoped-run.sh --burn-stale     # revoke exactly those
+```
+
+Staleness is read back out of the token's own name
+(`cfsr-<mint-epoch>-t<ttl-seconds>-<slug>`), so there is no state file to drift,
+and tokens outside that convention are never touched.
 
 ## Requirements
 
-`curl`, `jq` (always); `az` CLI only when using the optional Key Vault
-integration (`--vault-secret` / vault-held minter).
+`curl` and `jq`. `az` only if you use the optional Key Vault path. Bash 3.2+
+(macOS stock bash is fine).
+
+## Tests
+
+Hermetic — `curl` and `az` are PATH stubs, so a full run mints nothing, uses
+nothing and deletes nothing:
+
+```bash
+bash test/run-all.sh
+```
+
+Covered: the mint/verify/store gate, TTL and value-file handling, profile
+resolution and scope refusals, minter precedence and named refusals, and the
+burn on success, on command failure, and on SIGINT.

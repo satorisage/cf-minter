@@ -20,8 +20,10 @@
 #      --no-print-value — the value never appears in this tool's output). The
 #      TTL is the FLOOR under the pattern: even if this process is SIGKILLed
 #      between mint and burn, Cloudflare refuses the token once it expires.
-#   2. Use: run the given command with the value exported as CF_SCOPED_TOKEN
-#      (environment only — never argv, never printed).
+#   2. Use: run the given command with the value exported as CF_SCOPED_TOKEN and
+#      as CLOUDFLARE_API_TOKEN — the name the Cloudflare ecosystem already reads,
+#      so an unmodified tool needs no adaptation (environment only, never argv,
+#      never printed).
 #   3. Burn: an EXIT trap deletes the token at Cloudflare (cf-mint-token.sh
 #      --burn, by value) regardless of the command's outcome — success, failure,
 #      or interrupt. The command's own exit code is preserved, EXCEPT that a
@@ -88,6 +90,7 @@
 #
 # Env:
 #   CF_SCOPED_TOKEN         what the wrapped command receives: the minted value.
+#   CLOUDFLARE_API_TOKEN    the same value under the ecosystem's own name.
 #   CF_MINTER_TOKEN         the minter credential (User API Tokens:Edit), or
 #   CF_MINTER_VAULT_SECRET  + OPS_VAULT_NAME to read it from the ops vault —
 #                           passed through to cf-mint-token.sh untouched.
@@ -381,7 +384,7 @@ run_scoped(){
     if [[ "$MINT_ONLY" -eq 1 ]]; then
       info "would then PRINT the value once and NOT burn it (--mint-only); only the TTL ends it"
     else
-      info "would then run (with the minted value exported as CF_SCOPED_TOKEN):"
+      info "would then run (value exported as CF_SCOPED_TOKEN + CLOUDFLARE_API_TOKEN):"
       printf '    %s\n' "${CMD[*]}"
       info "and BURN the token on exit — success, failure, or interrupt alike"
     fi
@@ -452,10 +455,15 @@ run_scoped(){
   trap 'cfsr_burn; exit 143' TERM
   trap 'cfsr_burn' EXIT
 
-  hdr "run (CF_SCOPED_TOKEN exported, value never printed)"
+  hdr "run (CF_SCOPED_TOKEN + CLOUDFLARE_API_TOKEN exported, value never printed)"
   info "$ ${CMD[*]}"
   local cmd_rc=0
-  CF_SCOPED_TOKEN="$token" "${CMD[@]}" || cmd_rc=$?
+  # Two names for one value, both environment-only. CLOUDFLARE_API_TOKEN is what
+  # the Cloudflare ecosystem already reads (wrangler, the terraform provider,
+  # flarectl, most curl snippets), so an unmodified tool works under this wrapper
+  # with no adaptation; CF_SCOPED_TOKEN is the explicit name for a script written
+  # for this lifecycle, and says WHERE its credential came from.
+  CF_SCOPED_TOKEN="$token" CLOUDFLARE_API_TOKEN="$token" "${CMD[@]}" || cmd_rc=$?
 
   cfsr_burn
   trap - EXIT

@@ -324,6 +324,10 @@ if [[ "$rc" -eq 130 ]]; then ok "…and an interrupted run exits 130, not 0"; el
 set +m
 rm -f "$STUB_DIR/ready"
 
+run_scoped "$OUT" --profile dns-edit --zone-id zone-xyz-777 -- \
+  bash -c 'printf "ENVCHECK %s %s\n" "$CLOUDFLARE_API_TOKEN" "$CF_SCOPED_TOKEN" >> "$STUB_DIR/calls.log"'; rc=$?
+if grep -q "ENVCHECK $FAKE_TOKEN $FAKE_TOKEN" "$CALLS"; then ok "the command gets the value under BOTH names (CLOUDFLARE_API_TOKEN for unmodified tools)"; else bad "the two env names do not both carry the value: $(grep ENVCHECK "$CALLS")"; fi
+
 # ── 10. --mint-only: mint, print, do not burn ─────────────────────────────────
 echo "mint-only:"
 
