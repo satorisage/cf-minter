@@ -53,7 +53,9 @@ command never ran) or when the burn failed after a green command. A run that
 leaked a live credential is not a green run.
 
 
-### When one name means two permissions
+## When one name means two permissions
+
+Applies to `--perm` in both tools.
 
 Cloudflare publishes a handful of permission groups **twice under one name**,
 differing only in scope — `Access: Apps and Policies Write`, `Logs Read/Write`
