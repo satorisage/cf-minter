@@ -89,8 +89,16 @@ case "$method $url" in
       code=403
       body='{"success":false,"errors":[{"code":9109,"message":"Unauthorized to access requested resource"}],"result":null}'
     else
-      body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]}]}'
+      # "Access: Apps and Policies Write" is published TWICE under one name at
+      # two different scopes. That is real Cloudflare behaviour, not a contrived
+      # fixture: it is exactly what made a live mint fail with "2 candidates".
+      body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-aap-write-acct","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account"]},{"id":"pg-aap-write-zone","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-tunnel-write","name":"Cloudflare Tunnel Write","scopes":["com.cloudflare.api.account"]}]}'
     fi ;;
+  "GET "*"/accounts")
+    # Reached only when a mint carries an account-scoped permission. Before
+    # @scope disambiguation existed, no test used one, so this endpoint was
+    # never stubbed and an account-scoped mint died on "unexpected endpoint".
+    body='{"success":true,"errors":[],"result":[{"id":"acct-abc-123","name":"Stub Account"}]}' ;;
   "GET "*"/zones?name="*)
     body='{"success":true,"errors":[],"result":[{"id":"zone-abc-123"}]}' ;;
   "DELETE "*"/user/tokens/"*)
@@ -453,6 +461,52 @@ if [[ "$rc" -eq 2 ]] && grep -q "not readable" "$OUT"; then ok "a missing minter
 
 run_mint "$OUT" --minter-token some-secret --qualify-minter; rc=$?
 if [[ "$rc" -eq 2 ]] && grep -q "argv is world-readable" "$OUT"; then ok "--minter-token on argv is refused, with the reason"; else bad "--minter-token: want a named refusal, got $rc"; fi
+
+# ── @scope disambiguation ─────────────────────────────────────────────────────
+# Cloudflare publishes some permission groups twice under one name, differing
+# only in scope. Resolving by name alone cannot tell them apart, so the tool
+# must refuse rather than guess -- and must say how to proceed.
+#
+# Mints that are expected to SUCCEED need a passing verify plan; the harness
+# default is "500 bad" and each mint test overwrites it (see above).
+echo "200 ok" >"$STUB_DIR/verify.plan"
+
+run_mint "$OUT" --name t --perm "Access: Apps and Policies:Edit" --zone example.test; rc=$?
+if [[ "$rc" -ne 0 ]]; then ok "an ambiguous permission name is refused, not guessed"; else bad "ambiguous name was silently resolved (rc=$rc)"; fi
+if ! grep -q '^curl POST' "$CALLS"; then ok "…and no token is created when it cannot be resolved"; else bad "a token was minted despite an unresolvable perm"; fi
+if grep -q 'ambiguous' "$OUT" && grep -q '@account' "$OUT" && grep -q '@zone' "$OUT"; then
+  ok "…and the error names both scopes and the exact flag to add"
+else bad "ambiguity error did not teach the @scope syntax — $(tail -4 "$OUT")"; fi
+
+run_mint "$OUT" --name t --perm "Access: Apps and Policies:Edit@account"; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "@account resolves the same ambiguous name"; else bad "@account failed (rc=$rc) — $(tail -4 "$OUT")"; fi
+if grep -q 'pg-aap-write-acct' "$CALLS"; then ok "…to the ACCOUNT-scoped group id"; else bad "wrong group id sent for @account"; fi
+if ! grep -q 'pg-aap-write-zone' "$CALLS"; then ok "…and not the zone-scoped one"; else bad "the zone-scoped id leaked into an @account mint"; fi
+
+run_mint "$OUT" --name t --perm "Access: Apps and Policies:Edit@zone" --zone example.test; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'pg-aap-write-zone' "$CALLS"; then ok "@zone resolves the same name to the ZONE-scoped group"; else bad "@zone did not resolve correctly (rc=$rc)"; fi
+
+# A hint no candidate satisfies must say so specifically, rather than reporting
+# the generic "no such permission group" and sending the reader off to scan the
+# whole catalogue for a name that is plainly there.
+run_mint "$OUT" --name t --perm "Cloudflare Tunnel:Edit@zone" --zone example.test; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q 'none is @zone' "$OUT"; then ok "a hint no candidate satisfies reports THAT, not 'no such group'"; else bad "wrong-scope hint gave an unhelpful error — $(tail -4 "$OUT")"; fi
+if grep -q 'com.cloudflare.api.account' "$OUT"; then ok "…and shows which scopes that name does offer"; else bad "did not show the available scopes"; fi
+
+run_guarded 5 "$OUT" --name t --perm "DNS:Edit@region" --zone example.test; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "want @account or @zone" "$OUT"; then ok "an unknown @scope is refused by name"; else bad "bad scope not refused (rc=$rc)"; fi
+
+# Regression: the hint is optional, and unique names must be unaffected by it.
+run_mint "$OUT" --name t --perm DNS:Edit --zone example.test; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'pg-dns-write' "$CALLS"; then ok "a unique name still needs no hint"; else bad "unhinted resolution regressed (rc=$rc)"; fi
+run_mint "$OUT" --name t --perm "DNS:Edit@zone" --zone example.test; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'pg-dns-write' "$CALLS"; then ok "…and accepts a redundant but correct hint"; else bad "correct hint on a unique name failed (rc=$rc)"; fi
+
+# The dry-run must agree with the live path about which scope a hinted perm
+# lands in, or the plan misrepresents the token it is previewing.
+PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN=fake bash "$SCRIPT" --dry-run --name t \
+  --perm "Access: Apps and Policies:Edit@account" >"$OUT" 2>&1 </dev/null
+if grep -q '@account' "$OUT"; then ok "dry-run echoes the @scope hint back"; else bad "dry-run dropped the hint"; fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 echo

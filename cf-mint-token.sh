@@ -143,6 +143,12 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
   --name <token-name>     name for the new token (required to mint).
   --perm <Name:Level>     permission to grant, repeatable. Level is Edit or Read.
                           e.g. --perm DNS:Edit --perm "Zone Settings:Edit"
+                          Append @account or @zone when a name exists at both
+                          scopes (Cloudflare publishes some groups twice under
+                          one name) — e.g.
+                            --perm "Access: Apps and Policies:Edit@account"
+                          Optional: names that are unique need no hint, and an
+                          ambiguous one tells you the exact flag to add.
   --zone <zonename>       zone to scope zone-permissions to, repeatable.
                           e.g. --zone example.com --zone example.org
                           Omit -> the token is account-scoped only (no zone perms).
@@ -443,13 +449,45 @@ account_scoped_hint(){
 # Split a "Name:Level" spec into its base name and level; validate the level.
 # Sets PERM_BASE / PERM_LEVEL / PERM_SUFFIX. Dies (exit 2) on a malformed spec —
 # this is the offline "unknown perm" precondition (before any API call).
+# split_perm SPEC: parse "Name:Level" or "Name:Level@scope" into PERM_BASE,
+# PERM_LEVEL, PERM_SUFFIX and PERM_SCOPE (empty when no hint was given).
+#
+# The @scope hint exists because Cloudflare publishes some permission groups
+# TWICE under one name, differing only in scope — "Access: Apps and Policies
+# Write" is both account- and zone-scoped, as are "Logs Read/Write" and
+# "Disable ESC Read/Write". Resolving by name alone cannot tell those apart, so
+# without a hint the only honest thing is to refuse. The hint says which one you
+# meant; it stays optional because most names are unique and requiring it
+# everywhere would be noise.
 split_perm(){
   local spec="$1"
+  PERM_SCOPE=""
+  # Strip the scope hint first: the permission name itself may contain ':' and
+  # ' ', but never '@', so this split is unambiguous whichever comes first.
+  if [[ "$spec" == *@* ]]; then
+    PERM_SCOPE="$(lc "${spec##*@}")"
+    spec="${spec%@*}"
+    case "$PERM_SCOPE" in
+      account|zone) ;;
+      *) die "unknown scope '@$PERM_SCOPE' in '$1' — want @account or @zone" ;;
+    esac
+  fi
   [[ "$spec" == *:* ]] || die "malformed --perm '$spec' — want Name:Level (e.g. DNS:Edit)"
   PERM_BASE="${spec%:*}"; PERM_LEVEL="${spec##*:}"
   [[ -n "$PERM_BASE" ]] || die "malformed --perm '$spec' — empty permission name"
   PERM_SUFFIX="$(level_suffix "$PERM_LEVEL")" \
     || die "unknown permission level '$PERM_LEVEL' in '$spec' — want Edit or Read"
+}
+
+# scope_of GROUP_JSON: "zone" or "account", from the group's own scopes field
+# (the source of truth). A scope naming ".zone" is zone-scoped; anything else is
+# account-scoped. One definition, used by both the filter and the classifier, so
+# they cannot drift apart.
+scope_of(){
+  case "$(jq -r '.scopes // [] | join(",")' <<<"$1")" in
+    *zone*) printf 'zone' ;;
+    *)      printf 'account' ;;
+  esac
 }
 
 # ── LIST mode ─────────────────────────────────────────────────────────────────
@@ -602,10 +640,20 @@ mint_dry_run(){
   for p in "${PERMS[@]}"; do
     split_perm "$p"
     want="$PERM_BASE $PERM_SUFFIX"
-    info "would resolve permission: $p  ->  permission group named '$want'"
+    if [[ -n "$PERM_SCOPE" ]]; then
+      info "would resolve permission: $p  ->  group named '$want', @$PERM_SCOPE"
+    else
+      info "would resolve permission: $p  ->  permission group named '$want'"
+    fi
     local obj
     obj="$(jq -nc --arg id "<pg-id: $want>" --arg n "$want" '{id:$id, name:$n}')"
-    if account_scoped_hint "$PERM_BASE"; then
+    # An explicit @scope hint wins over the built-in guess: the caller has told
+    # us which one they mean, and the guess exists only to fill that silence.
+    if [[ "$PERM_SCOPE" == "zone" ]]; then
+      zone_pg="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$zone_pg")"
+    elif [[ "$PERM_SCOPE" == "account" ]]; then
+      acct_pg="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$acct_pg")"
+    elif account_scoped_hint "$PERM_BASE"; then
       acct_pg="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$acct_pg")"
     else
       zone_pg="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$zone_pg")"
@@ -737,8 +785,38 @@ mint_live(){
         '[.result[] | select((.name|ascii_downcase|endswith(" " + ($s|ascii_downcase))) and (.name|ascii_downcase|contains($b|ascii_downcase)))]' <<<"$pg_all")"
       n_match="$(jq -r 'length' <<<"$match")"
     fi
-    if [[ "$n_match" -ne 1 ]]; then
-      fail "could not resolve --perm '$p' (looked for '$want') — $n_match candidates."
+
+    # Narrow by the @scope hint when one was given. Applied AFTER matching so a
+    # wrong hint reports "no candidate with that scope" rather than silently
+    # behaving like no match at all.
+    if [[ -n "$PERM_SCOPE" && "$n_match" -gt 0 ]]; then
+      local scoped='[]' cand i
+      for (( i=0; i<n_match; i++ )); do
+        cand="$(jq -c --argjson i "$i" '.[$i]' <<<"$match")"
+        [[ "$(scope_of "$cand")" == "$PERM_SCOPE" ]] \
+          && scoped="$(jq -c --argjson c "$cand" '. + [$c]' <<<"$scoped")"
+      done
+      if [[ "$(jq -r 'length' <<<"$scoped")" -eq 0 ]]; then
+        fail "--perm '$p': found $n_match group(s) named '$want', but none is @$PERM_SCOPE."
+        printf '%s  what that name actually offers:%s\n' "$Y" "$Z" >&2
+        jq -r '.[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$match" >&2
+        exit 1
+      fi
+      match="$scoped"
+      n_match="$(jq -r 'length' <<<"$match")"
+    fi
+
+    if [[ "$n_match" -gt 1 ]]; then
+      fail "--perm '$p' is ambiguous — $n_match permission groups share the name '$want':"
+      jq -r '.[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$match" >&2
+      printf '%s  Cloudflare publishes some groups under one name at both scopes.%s\n' "$Y" "$Z" >&2
+      printf '%s  Say which you mean by appending @account or @zone:%s\n' "$Y" "$Z" >&2
+      printf '      --perm "%s:%s@account"\n' "$PERM_BASE" "$PERM_LEVEL" >&2
+      printf '      --perm "%s:%s@zone"\n' "$PERM_BASE" "$PERM_LEVEL" >&2
+      exit 1
+    fi
+    if [[ "$n_match" -eq 0 ]]; then
+      fail "could not resolve --perm '$p' (looked for '$want') — no such permission group."
       printf '%s  available permission groups (name — scope):%s\n' "$Y" "$Z" >&2
       jq -r '.result | sort_by(.name)[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$pg_all" >&2
       exit 1
@@ -747,9 +825,9 @@ mint_live(){
     pg_name="$(jq -r '.[0].name' <<<"$match")"
     # Scope class from the group's own scopes field (the source of truth). A scope
     # that names ".zone" is zone-scoped; anything else is account-scoped.
-    pg_scope="$(jq -r '.[0].scopes // [] | join(",")' <<<"$match")"
+    pg_scope="$(scope_of "$(jq -c '.[0]' <<<"$match")")"
     local obj; obj="$(jq -nc --arg id "$pg_id" '{id:$id}')"
-    if [[ "$pg_scope" == *zone* ]]; then
+    if [[ "$pg_scope" == "zone" ]]; then
       zone_pg="$(jq -c --argjson o "$obj" '. + [$o]' <<<"$zone_pg")"
       pass "resolved $p  ->  $pg_name (zone-scoped)"
     else

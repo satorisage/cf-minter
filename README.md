@@ -42,7 +42,7 @@ replacement: everything credential-shaped still happens in the mint tool.
 | `--mint-only` | mint and print the value once, run nothing, do **not** burn — for hand-driven work. Only the TTL ends it |
 | `--minter-cmd <cmd>` | shell command that prints the minter token — the hook for your own secret store |
 | `--minter-token-file <p>` | read the minter from a file's first line |
-| `--perm <Name:Level>` | ad-hoc permission instead of a profile, repeatable (e.g. `--perm DNS:Edit`) |
+| `--perm <Name:Level>` | ad-hoc permission instead of a profile, repeatable (e.g. `--perm DNS:Edit`). Append `@account` or `@zone` to disambiguate a name Cloudflare publishes at both scopes — see below |
 | `--dry-run` | print exactly what would be minted and run; no network calls, nothing created |
 | `--list-profiles` | print the profiles and their reach |
 | `--list-stale` | list `cfsr-*` tokens past the TTL their own name declares — i.e. runs whose burn failed. Exit 1 if any |
@@ -51,6 +51,37 @@ replacement: everything credential-shaped still happens in the mint tool.
 Exit code: the wrapped command's own — except **1** when the mint failed (the
 command never ran) or when the burn failed after a green command. A run that
 leaked a live credential is not a green run.
+
+
+### When one name means two permissions
+
+Cloudflare publishes a handful of permission groups **twice under one name**,
+differing only in scope — `Access: Apps and Policies Write`, `Logs Read/Write`
+and `Disable ESC Read/Write` each exist as both an account-scoped and a
+zone-scoped group. Resolving by name alone cannot tell them apart, so cf-minter
+refuses rather than guessing which one you meant:
+
+```
+FAIL  --perm 'Access: Apps and Policies:Edit' is ambiguous — 2 permission
+      groups share the name 'Access: Apps and Policies Write':
+    Access: Apps and Policies Write  [com.cloudflare.api.account]
+    Access: Apps and Policies Write  [com.cloudflare.api.account.zone]
+  Say which you mean by appending @account or @zone:
+      --perm "Access: Apps and Policies:Edit@account"
+      --perm "Access: Apps and Policies:Edit@zone"
+```
+
+Do what it says:
+
+```bash
+CF_MINTER_TOKEN=… ./cf-mint-token.sh --name glpi-provision \
+  --perm "Access: Apps and Policies:Edit@account" \
+  --perm "DNS:Edit" --zone example.com
+```
+
+The hint is **optional** — unique names need none, and a redundant but correct
+one is accepted. A hint no candidate satisfies is reported as such, with the
+scopes that name *does* offer, rather than as a generic "no such group".
 
 ## Profiles
 
