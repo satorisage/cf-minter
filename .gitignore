@@ -1,0 +1,7 @@
+
+# dotagent: derived MCP index — markdown is canonical (D-0027)
+.agent/dotagent.db
+.agent/dotagent.db-*
+
+# dotagent: machine-local path stamp — must not be committed
+.agent/.project-path
