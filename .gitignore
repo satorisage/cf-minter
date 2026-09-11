@@ -11,3 +11,13 @@
 # catches any that predate that change or arrive from an older install.
 # project-brief.md is the OUTPUT and stays tracked.
 .agent/REPORTS/*-pack.md
+
+# dotagent: the published operating canon. Cross-project working discipline,
+# not documentation of this tool — it regenerates from the dotagent install,
+# so it is local-only rather than part of what a user clones.
+CLAUDE.md
+
+# dotagent: tooling-sweep reports. These audit the dotagent engines, carry
+# absolute machine paths, and say nothing about cf-minter. Project-specific
+# tracking (scope, state, brief, decisions) IS tracked.
+.agent/REPORTS/ARCHIVED/*-button-up.md

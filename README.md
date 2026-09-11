@@ -15,6 +15,30 @@ with a 15-minute expiry, runs `./publish-records.sh` with the value in
 before it returns. The value is never printed, never logged, never written
 anywhere but a 0600 temp file that does not outlive the mint.
 
+## Install
+
+Clone it somewhere permanent and put the entry point on your `PATH`:
+
+```bash
+git clone https://github.com/satorisage/cf-minter ~/.local/share/cf-minter
+ln -s ~/.local/share/cf-minter/cf-minter ~/.local/bin/cf-minter   # any dir on your PATH
+cf-minter doctor
+```
+
+The symlink is the whole install — `cf-minter` resolves the link and finds its
+tools and `profiles.conf` beside the real script, so the clone can live
+anywhere. Update with `git pull` in that directory; uninstall by deleting the
+directory and the link.
+
+Needs `bash`, `curl` and `jq`. `cf-minter doctor` checks all three and tells you
+what is missing.
+
+**Read it before you trust it.** This tool asks you for a credential that can
+create and delete other credentials, so the whole thing is ~1000 lines of shell
+you can audit in one sitting. That is deliberate, and it is why there is no
+`curl | bash` installer here: a tool whose job is careful credential handling
+should not open by asking you to pipe a remote script into your shell.
+
 ## Start here
 
 Run `./cf-minter` on its own and it tells you what it does. Then:

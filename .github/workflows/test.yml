@@ -1,0 +1,42 @@
+# The suite is hermetic: curl and az are PATH stubs, so a full run mints
+# nothing, uses nothing and deletes nothing. That is why this workflow needs no
+# secrets at all — there is no Cloudflare token to configure and nothing a fork
+# PR could exfiltrate.
+#
+# Both legs exist because the one bug this repo has had that review could not
+# catch was a GNU/BSD split: a test read a file mode with BSD stat syntax, and
+# GNU stat rejects it while still printing to stdout, so the capture was
+# poisoned. It passed on macOS for as long as macOS was the only place it ran.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # curl ships on both runners; jq ships on Ubuntu but not always on macOS.
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew list jq >/dev/null 2>&1 || brew install jq
+
+      - name: Versions under test
+        run: |
+          bash --version | head -1
+          curl --version | head -1
+          jq --version
+
+      - name: Run the hermetic suite
+        run: bash test/run-all.sh
