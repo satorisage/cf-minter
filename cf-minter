@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+#
+# cf-minter — one entry point for the scope-exact Cloudflare credential tools.
+#
+# This is a DISPATCHER, not an implementation. Every verb below hands off to one
+# of the two tools that do the work:
+#
+#   cf-scoped-run.sh   the mint -> use -> burn lifecycle, profiles, stale sweep
+#   cf-mint-token.sh   the credential itself: resolve, mint, verify, list, revoke
+#
+# It exists because those two scripts are an internal boundary, not something a
+# person should have to learn. Nothing here knows how to mint, burn, or talk to
+# Cloudflare, and nothing here ever handles a token value — adding knowledge to
+# this file is the mistake it is designed to prevent.
+
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN="$HERE/cf-scoped-run.sh"
+MINT="$HERE/cf-mint-token.sh"
+
+B=$'\033[1m'; D=$'\033[2m'; Z=$'\033[0m'
+[[ -t 1 ]] || { B=""; D=""; Z=""; }
+
+die(){ printf '%serror:%s %s\n' "$B" "$Z" "$1" >&2; exit "${2:-2}"; }
+
+usage(){
+  cat <<USAGE
+${B}cf-minter${Z} — a Cloudflare credential that exists only while your job runs.
+
+${B}USAGE${Z}
+  cf-minter <command> [options]
+
+${B}COMMANDS${Z}
+  ${B}run${Z}       mint a scoped token, run a command with it, burn it afterwards
+  ${B}mint${Z}      mint a token and print it once, for hand-driven work
+  ${B}profiles${Z}  list the named purposes you can mint (and the reach each grants)
+  ${B}list${Z}      list your API tokens; --stale for runs whose burn failed
+  ${B}burn${Z}      revoke a token by id; --stale to sweep failed burns
+  ${B}doctor${Z}    check your setup: curl, jq, and whether your minter qualifies
+
+${B}GETTING STARTED${Z}
+  Creating and deleting tokens is itself privileged, so cf-minter needs a
+  credential carrying "User API Tokens:Edit". Check what you have:
+
+      export CF_MINTER_TOKEN=…
+      cf-minter doctor
+
+  Then see what you can ask for, and try it without touching the network:
+
+      cf-minter profiles
+      cf-minter run --profile dns-edit --zone example.com --dry-run -- ./publish.sh
+
+  Drop --dry-run to do it for real. The command gets the value in
+  CLOUDFLARE_API_TOKEN and CF_SCOPED_TOKEN; cf-minter deletes the token at
+  Cloudflare on the way out, whether your command succeeded, failed, or you
+  pressed Ctrl-C.
+
+${B}HELP ON ONE COMMAND${Z}
+  cf-minter <command> --help      e.g. cf-minter run --help
+
+${D}Requires curl and jq. 'cf-minter doctor' checks both.${Z}
+USAGE
+}
+
+# Every verb resolves to an exec of one of the two tools. Keeping this a pure
+# mapping — no logic between the verb and the handoff — is what lets the tools'
+# own tests remain the whole safety net for behavior.
+main(){
+  [[ $# -gt 0 ]] || { usage; exit 0; }
+
+  local verb="$1"; shift
+  case "$verb" in
+    -h|--help|help)  usage; exit 0 ;;
+    -V|--version|version)
+      printf 'cf-minter (dispatcher) — see %s and %s for the tools it drives\n' \
+        "$(basename "$RUN")" "$(basename "$MINT")"; exit 0 ;;
+
+    run)      exec "$RUN" "$@" ;;
+    mint)     exec "$RUN" --mint-only "$@" ;;
+    profiles) exec "$RUN" --list-profiles "$@" ;;
+
+    # 'list' and 'burn' each address two different populations: every token on
+    # the account, and just the cfsr-* residue of runs whose burn failed. The
+    # --stale flag picks the second; without it you get the account-wide view.
+    list)
+      if [[ "${1:-}" == "--stale" ]]; then shift; exec "$RUN" --list-stale "$@"
+      else exec "$MINT" --list "$@"; fi ;;
+    burn)
+      if [[ "${1:-}" == "--stale" ]]; then shift; exec "$RUN" --burn-stale "$@"
+      elif [[ $# -gt 0 && "$1" != -* ]]; then local id="$1"; shift; exec "$MINT" --revoke "$id" "$@"
+      else die "burn needs something to burn — pass a token id (cf-minter list shows them), or --stale to sweep runs whose burn failed."; fi ;;
+
+    doctor)   doctor "$@" ;;
+
+    # A near-miss should say what you meant, not just that you were wrong.
+    --*)      die "cf-minter takes a command first, not a flag. Try: cf-minter run ${verb}${*:+ $*}  (cf-minter help lists the commands)" ;;
+    *)        die "unknown command '$verb'. Commands: run, mint, profiles, list, burn, doctor. Run 'cf-minter help' for what each does." ;;
+  esac
+}
+
+# doctor is the only verb with content of its own, and it is deliberately thin:
+# the dependency checks live here because nothing else owns them, and the minter
+# check delegates to the tool that defines what qualifying means.
+doctor(){
+  [[ "${1:-}" != "--help" ]] || { printf 'cf-minter doctor — check curl, jq, and whether your minter credential qualifies.\n'; exit 0; }
+
+  local rc=0
+  printf '%sdependencies%s\n' "$B" "$Z"
+  local dep
+  for dep in curl jq; do
+    if command -v "$dep" >/dev/null 2>&1; then
+      printf '  ok    %s  %s%s%s\n' "$dep" "$D" "$(command -v "$dep")" "$Z"
+    else
+      printf '  MISS  %s — cf-minter cannot run without it\n' "$dep" >&2; rc=1
+    fi
+  done
+
+  printf '\n%sminter credential%s\n' "$B" "$Z"
+  if [[ -z "${CF_MINTER_TOKEN:-}${CF_MINTER_CMD:-}${CF_MINTER_VAULT_SECRET:-}" ]]; then
+    printf '  MISS  no minter configured — set CF_MINTER_TOKEN, or pass --minter-cmd\n' >&2
+    printf '        %sa minter is a credential carrying "User API Tokens:Edit"; a normal%s\n' "$D" "$Z" >&2
+    printf '        %sscoped token cannot create or delete tokens.%s\n' "$D" "$Z" >&2
+    rc=1
+  else
+    # Qualification is a measurement, never a guess from the name — the mint
+    # tool owns what the measurement is.
+    "$MINT" --qualify-minter || rc=1
+  fi
+
+  printf '\n'
+  if [[ $rc -eq 0 ]]; then printf '%sready.%s try: cf-minter profiles\n' "$B" "$Z"
+  else printf '%snot ready%s — fix the items above, then re-run cf-minter doctor\n' "$B" "$Z"; fi
+  exit $rc
+}
+
+main "$@"
