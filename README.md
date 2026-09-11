@@ -54,7 +54,10 @@ tools:
 | `cf-mint-token.sh` | the credential itself: resolve names to ids, mint, **verify**, store, list, revoke, burn |
 
 Both remain usable directly and their flags are unchanged, so existing call
-sites keep working. `cf-minter run` is `cf-scoped-run.sh`; `cf-minter mint` is
+sites keep working. `cf-minter` covers the common path rather than every flag —
+`cf-mint-token.sh` carries nine more (`--name`, `--value-file`,
+`--no-print-value`, `--vault-name`, and others) for callers that need them.
+`./cf-mint-token.sh --help` lists them. You should not need it to use the tool. `cf-minter run` is `cf-scoped-run.sh`; `cf-minter mint` is
 `cf-scoped-run.sh --mint-only`; `cf-minter list` is `cf-mint-token.sh --list`,
 and `cf-minter list --stale` is `cf-scoped-run.sh --list-stale`. The split is a
 real module boundary — it is just no longer something you have to learn first.
@@ -105,7 +108,7 @@ FAIL  --perm 'Access: Apps and Policies:Edit' is ambiguous — 2 permission
 Do what it says:
 
 ```bash
-CF_MINTER_TOKEN=… ./cf-mint-token.sh --name glpi-provision \
+CF_MINTER_TOKEN=… ./cf-minter mint \
   --perm "Access: Apps and Policies:Edit@account" \
   --perm "DNS:Edit" --zone example.com
 ```
@@ -118,6 +121,12 @@ scopes that name *does* offer, rather than as a generic "no such group".
 
 Profiles live in `profiles.conf`. That file is the only place a profile is
 defined; no code knows one by name.
+
+**These seven are a starting set, not a catalogue.** They cover the work this
+tool was built for; they are not an attempt to enumerate Cloudflare. If what you
+need is not here — cache purge, R2, Workers KV, Logpush — adding it is one edit
+to `profiles.conf` and no code change (see [Adding a profile](#adding-a-profile)),
+or skip profiles entirely with `--perm`.
 
 | profile | permissions | scope | ttl |
 |---|---|---|---|
@@ -135,7 +144,8 @@ asked for.
 
 ### Adding a profile
 
-One edit, no code:
+One edit, no code. This one is **an illustration, not a shipped profile** —
+`cf-minter profiles` lists what actually ships:
 
 ```
 profile: logs-read
@@ -145,6 +155,11 @@ scope: zone
 ttl: 10m
 why: pull Logpush job state for one zone
 ```
+
+Add that block to `profiles.conf` and `--profile logs-read` works immediately.
+If `Logs:Read` is not what Cloudflare calls that group today, the first real
+mint says so by name and lists the groups that do exist — which is the point of
+resolving names live rather than hardcoding ids.
 
 Permission names are the human names from Cloudflare's token editor
 (`Name:Edit` / `Name:Read`); they are resolved to permission-group UUIDs by a

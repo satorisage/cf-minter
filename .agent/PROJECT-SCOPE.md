@@ -6,19 +6,39 @@
 
 ## Active milestone
 
-**Milestone:** M1 — the `cf-minter` dispatcher + ergonomics pass
+**Milestone:** M2 — close the open ergonomics questions
+**Ratified:** 2026-09-11, via walkthrough. M1 is complete (see PROJECT-STATE).
 
-**Definition of done** (all observable):
+M2 was three rulings, not a build. Each was an open question the vision brief
+left, and each is now answered:
 
-- `extract-standalone-runner` is landed on `main`
-- `cf-minter` with no arguments explains itself — a cold operator knows what to
-  do next without opening the README
-- `run` / `mint` / `profiles` / `list` / `burn` / `doctor` all exist and work
-- every refusal names the fix, not just the problem
-- `bash test/run-all.sh` green, including the SIGINT-burn case
-- README rewritten to the new surface
+1. **`cf-mint-token.sh` stays supported but stops being taught.** Every flag
+   keeps working — nothing that calls it breaks — but the README no longer
+   presents it as a way in. Measured at decision time: it exposes 17 flags and
+   `cf-minter` reaches 8, so the dispatcher is a friendly surface over the
+   common path, not a complete one. The README now says exactly that and points
+   at `--help` for the other nine, rather than implying either that they don't
+   exist or that the tool is a second front door.
+2. **`profiles.conf` ships its seven as a declared starting set.** Not a
+   catalogue of Cloudflare, and said so in both the README and the file's own
+   header. No profiles were added: permission names resolve by a live catalogue
+   read that `--dry-run` does not perform, so an unverified name cannot be
+   checked offline, and guessing at vendor strings is the failure this project
+   refuses by design.
+3. **The repo ships as-is** — `.agent/` and `CLAUDE.md` included. Not a
+   constraint violation (the constraint governs source, runtime strings and the
+   README, all of which are clean). Revisit when the repo actually goes public;
+   it is not public yet, so the question is premature.
 
-**Active blockers:** none
+**Definition of done:** all three rulings enacted in the README and
+`profiles.conf`, suite green. **Met.**
+
+**Next:** M3 — public-release readiness, not yet scoped. The gating facts, all
+verified 2026-09-11: there is no git remote, no LICENSE, no CI, no install path
+and no tag. Until those exist this project's own stated success test — "a
+stranger goes from clone to a working scoped run in under a minute" — is not
+merely unmet but impossible, since nobody can clone what is unpublished or
+legally reuse what is unlicensed.
 
 ## Hard constraints
 

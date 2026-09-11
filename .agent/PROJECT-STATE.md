@@ -1,13 +1,16 @@
 # Project State
 
-**Last updated:** 2026-09-10
-**Active focus:** M1 (the `cf-minter` dispatcher + ergonomics pass) is **complete
-and verified** — all five definition-of-done items demonstrated, 180 assertions
-green. The project is between milestones; M2 has not been scoped. The three
-ergonomics questions the brief left open are now two, since the dispatcher
-settled the surface: whether `cf-mint-token.sh`'s flag surface stays as a
-compatibility layer, and whether `profiles.conf` ships the right defaults for a
-stranger.
+**Last updated:** 2026-09-11
+**Active focus:** M1 and M2 are both **complete**. Every ergonomics question the
+vision brief left open is now answered and enacted — see PROJECT-SCOPE.md's
+Active milestone for the three M2 rulings. 180 assertions green.
+
+The project is between milestones. **M3 is public-release readiness and is not
+scoped yet**, and it is the milestone that matters: this repo has no remote, no
+LICENSE, no CI, no install path and no tag, which makes the scope's own success
+test ("a stranger goes from clone to a working scoped run in under a minute")
+impossible rather than merely unmet. Everything the tool needs to *work* is
+done; nothing it needs to be *obtainable* has started.
 
 <!-- History cap (D-0072): keep at most the current head + ~1 most-recent
      `**Prior YYYY-MM-DD —**` entry inline here. When you add a newer Prior
@@ -92,10 +95,12 @@ reconstructed rather than emitted — every field measured, none assumed:
 - `pairings-list-sha: 9e43c9f76c67` — computed by the stamp writer's own
   method, validated by reproducing today's `5fd2e6dc6613` with the same steps.
 
-**Next session:** no milestone is active. M2 needs scoping — the natural
-candidates are the two remaining ergonomics questions above, or public-release
-readiness (LICENSE, CI running the hermetic suite, a documented install path),
-which the scope names as the project's purpose but which nothing has started.
+**Next session:** scope M3 — public-release readiness. The decisions it needs,
+none of which are mine to make: which licence; where the remote lives (GitHub?
+under what name?); whether CI is GitHub Actions; what the install path is
+(clone, `curl | bash`, Homebrew tap); and whether `.agent/` + `CLAUDE.md` still
+ship once the repo is genuinely public — that last one was deliberately deferred
+from M2 on the grounds that it is premature while the repo is private.
 ---
 
 ## 1. Authority surface — where to look for X
