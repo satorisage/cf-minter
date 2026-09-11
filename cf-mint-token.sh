@@ -270,7 +270,7 @@ while [[ $# -gt 0 ]]; do
     --burn)          MODE="burn"; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
     -h|--help)       usage 0 ;;
-    *)               die "unknown flag: $1" ;;
+    *)               die "unknown flag: $1 — run cf-mint-token.sh --help for this tool's flags, or cf-minter help for the friendlier surface over it." ;;
   esac
 done
 
@@ -316,9 +316,9 @@ if [[ -z "${CF_MINTER_TOKEN:-}" ]]; then
 fi
 
 # ── common preconditions ──────────────────────────────────────────────────────
-command -v jq >/dev/null 2>&1 || die "jq not found (required)"
+command -v jq >/dev/null 2>&1 || die "jq not found — required to parse the Cloudflare API's responses. Install it (brew install jq / apt install jq), then re-run; cf-minter doctor checks for it."
 if [[ "$DRY_RUN" -ne 1 ]]; then
-  command -v curl >/dev/null 2>&1 || die "curl not found"
+  command -v curl >/dev/null 2>&1 || die "curl not found — required to reach the Cloudflare API. Install it, then re-run; cf-minter doctor checks for it."
 fi
 
 # Cloudflare's auth edge is eventually-consistent: a just-minted token can be
@@ -881,7 +881,7 @@ mint_live(){
     else
       local acc; acc="$(cf_ok "resolve account" GET "accounts")"
       acct_id="$(jq -r '.result[0].id // empty' <<<"$acc")"
-      [[ -n "$acct_id" ]] || die "no account visible to the minter (GET /accounts empty)" 1
+      [[ -n "$acct_id" ]] || die "no account visible to the minter (GET /accounts returned none) — the credential can read tokens but belongs to no account, which an account-scoped permission needs. Check it was created under the right account." 1
       [[ "$(jq -r '.result | length' <<<"$acc")" -eq 1 ]] \
         || warn "minter can see >1 account — using the first ($acct_id); pin with CF_ACCOUNT_ID"
     fi

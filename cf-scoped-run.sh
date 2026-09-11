@@ -397,7 +397,7 @@ run_scoped(){
   # command sees the value only in its environment.
   local vfile
   vfile="$(umask 077; mktemp "${TMPDIR:-/tmp}/cf-scoped-run.XXXXXX")" \
-    || die "could not create a private temp file for the token value" 1
+    || die "could not create a private temp file for the token value — check that TMPDIR (${TMPDIR:-/tmp}) exists and is writable. Nothing was minted, nothing ran." 1
 
   hdr "mint ephemeral token '$token_name' (TTL $TTL)"
   local mint_out mint_rc=0
