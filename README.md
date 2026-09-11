@@ -6,7 +6,7 @@ out — success, failure, or Ctrl-C alike.
 
 ```bash
 export CF_MINTER_TOKEN=…            # a credential with "User API Tokens:Edit"
-./cf-scoped-run.sh --profile dns-edit --zone example.com -- ./publish-records.sh
+./cf-minter run --profile dns-edit --zone example.com -- ./publish-records.sh
 ```
 
 That mints a token carrying exactly `DNS:Edit` + `Zone:Read` on `example.com`,
@@ -15,22 +15,51 @@ with a 15-minute expiry, runs `./publish-records.sh` with the value in
 before it returns. The value is never printed, never logged, never written
 anywhere but a 0600 temp file that does not outlive the mint.
 
-Start with `--dry-run` to see the exact plan (permissions, scope, TTL) with zero
-network calls, and `--list-profiles` to see what you can ask for.
+## Start here
 
-## The two tools
+Run `./cf-minter` on its own and it tells you what it does. Then:
+
+```bash
+./cf-minter doctor                  # is curl/jq present, and does your credential qualify?
+./cf-minter profiles                # what can I ask for, and what reach does each hand out?
+./cf-minter run --profile dns-edit --zone example.com --dry-run -- ./publish-records.sh
+```
+
+`--dry-run` prints the exact plan — permissions, scope, TTL, and the API call
+that would be made — with **zero network calls and no credential required**. It
+is the safe way to see what a profile actually grants before you grant it.
+
+## Commands
+
+| command | what it does |
+|---|---|
+| `cf-minter run … -- <cmd>` | mint a scoped token, run `<cmd>` with it, burn it afterwards |
+| `cf-minter mint …` | mint and print the value once, run nothing, do **not** burn — for hand-driven work. Only the TTL ends it |
+| `cf-minter profiles` | list the named purposes and the reach each grants |
+| `cf-minter list` | list your API tokens; `--stale` for runs whose burn failed |
+| `cf-minter burn <id>` | revoke that token; `--stale` to sweep failed burns |
+| `cf-minter doctor` | check `curl`, `jq`, and whether your minter credential qualifies |
+
+Run `cf-minter <command> --help` for one command's own flags.
+
+## What is underneath
+
+`cf-minter` is a dispatcher. It holds no logic of its own — it never sees a
+token value and never calls Cloudflare — and hands every command to one of two
+tools:
 
 | tool | what it owns |
 |---|---|
 | `cf-scoped-run.sh` | the **mint → use → burn** lifecycle, profiles, the burn trap, stale-token sweeping |
 | `cf-mint-token.sh` | the credential itself: resolve names to ids, mint, **verify**, store, list, revoke, burn |
 
-`cf-mint-token.sh` is unchanged as an entry point — every existing call site
-(`--name/--perm/--zone/--zone-id/--ttl/--value-file/--vault-secret/--list/--revoke/--burn/--dry-run`)
-works exactly as before. `cf-scoped-run.sh` is a wrapper over it, not a
-replacement: everything credential-shaped still happens in the mint tool.
+Both remain usable directly and their flags are unchanged, so existing call
+sites keep working. `cf-minter run` is `cf-scoped-run.sh`; `cf-minter mint` is
+`cf-scoped-run.sh --mint-only`; `cf-minter list` is `cf-mint-token.sh --list`,
+and `cf-minter list --stale` is `cf-scoped-run.sh --list-stale`. The split is a
+real module boundary — it is just no longer something you have to learn first.
 
-## cf-scoped-run.sh flags
+## Flags for `run` and `mint`
 
 | flag | meaning |
 |---|---|
@@ -142,19 +171,19 @@ argv is world-readable in `ps`:
 
 ```bash
 # 1Password
-./cf-scoped-run.sh --minter-cmd 'op read op://Infra/cf-minter/credential' \
+./cf-minter run --minter-cmd 'op read op://Infra/cf-minter/credential' \
   --profile dns-edit --zone example.com -- ./publish-records.sh
 
 # HashiCorp Vault
-./cf-scoped-run.sh --minter-cmd 'vault kv get -field=token secret/cloudflare/minter' \
+./cf-minter run --minter-cmd 'vault kv get -field=token secret/cloudflare/minter' \
   --profile certs --zone example.com -- ./issue-origin-cert.sh
 
 # AWS Secrets Manager
-./cf-scoped-run.sh --minter-cmd 'aws secretsmanager get-secret-value --secret-id cf-minter --query SecretString --output text' \
+./cf-minter run --minter-cmd 'aws secretsmanager get-secret-value --secret-id cf-minter --query SecretString --output text' \
   --profile pages-deploy -- npx wrangler pages deploy ./dist
 
 # Azure Key Vault
-./cf-scoped-run.sh --minter-cmd 'az keyvault secret show --vault-name my-vault --name cf-minter-token --query value -o tsv' \
+./cf-minter run --minter-cmd 'az keyvault secret show --vault-name my-vault --name cf-minter-token --query value -o tsv' \
   --profile zone-settings --zone example.com -- ./flip-tls-setting.sh
 ```
 
@@ -166,7 +195,7 @@ error — it is never treated as "no token configured".
 Ask by measurement, never by what it is named:
 
 ```bash
-CF_MINTER_TOKEN=… ./cf-mint-token.sh --qualify-minter
+CF_MINTER_TOKEN=… ./cf-minter doctor
 ```
 
 A credential qualifies iff `GET /user/tokens/permission_groups` succeeds. A
@@ -187,8 +216,8 @@ the run says so loudly with the token's name and exits non-zero — and the toke
 is still bounded by its TTL. Sweep the residue afterwards:
 
 ```bash
-./cf-scoped-run.sh --list-stale     # exit 1 if any run's burn failed
-./cf-scoped-run.sh --burn-stale     # revoke exactly those
+./cf-minter list --stale            # exit 1 if any run's burn failed
+./cf-minter burn --stale            # revoke exactly those
 ```
 
 Staleness is read back out of the token's own name
