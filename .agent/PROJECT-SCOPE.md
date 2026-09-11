@@ -6,39 +6,39 @@
 
 ## Active milestone
 
-**Milestone:** M2 — close the open ergonomics questions
-**Ratified:** 2026-09-11, via walkthrough. M1 is complete (see PROJECT-STATE).
+**Milestone:** M3 — public-release readiness
+**Ratified:** 2026-09-11, via walkthrough. M1 and M2 complete.
 
-M2 was three rulings, not a build. Each was an open question the vision brief
-left, and each is now answered:
+Five rulings, all enacted in `21f0601` except the last step, which is the
+operator's to run:
 
-1. **`cf-mint-token.sh` stays supported but stops being taught.** Every flag
-   keeps working — nothing that calls it breaks — but the README no longer
-   presents it as a way in. Measured at decision time: it exposes 17 flags and
-   `cf-minter` reaches 8, so the dispatcher is a friendly surface over the
-   common path, not a complete one. The README now says exactly that and points
-   at `--help` for the other nine, rather than implying either that they don't
-   exist or that the tool is a second front door.
-2. **`profiles.conf` ships its seven as a declared starting set.** Not a
-   catalogue of Cloudflare, and said so in both the README and the file's own
-   header. No profiles were added: permission names resolve by a live catalogue
-   read that `--dry-run` does not perform, so an unverified name cannot be
-   checked offline, and guessing at vendor strings is the failure this project
-   refuses by design.
-3. **The repo ships as-is** — `.agent/` and `CLAUDE.md` included. Not a
-   constraint violation (the constraint governs source, runtime strings and the
-   README, all of which are clean). Revisit when the repo actually goes public;
-   it is not public yet, so the question is premature.
+1. **MIT**, holder `Copyright (c) 2026 satorisage` — matching the five other
+   licensed repos here. The hard blocker: with no LICENSE the repo was "all
+   rights reserved" and the scope's success test was unsatisfiable, not merely
+   unmet.
+2. **`github.com/satorisage/cf-minter`, private first, public at M3's end.**
+   Name verified free. Gets the code off a single machine today; the repo is
+   only ever publicly seen finished.
+3. **CI on GitHub Actions, ubuntu + macos.** Needs no secrets — the suite is
+   hermetic, so there is nothing for a fork PR to exfiltrate. Both legs exist
+   because of the GNU/BSD bug in `5be095c`.
+4. **Install is clone + symlink, documented.** No `curl | bash`: a credential
+   tool should not open by asking the reader not to look, which is the same
+   position as principle 3 below.
+5. **`CLAUDE.md` and tooling-sweep reports leave the tracked set.** Neither is
+   about cf-minter. Scope, state, brief, decisions and rulings still ship — a
+   security tool that publishes its reasoning is more trustworthy for it.
 
-**Definition of done:** all three rulings enacted in the README and
-`profiles.conf`, suite green. **Met.**
+**Definition of done:**
+- [x] LICENSE committed
+- [x] CI workflow, both platforms, no secrets
+- [x] Install section, verified working via symlink
+- [x] public payload decided; no tracked file carries a machine path
+- [ ] remote created and `main` pushed
+- [ ] CI observed green on the remote
+- [ ] visibility flipped to public, `v0.1.0` tagged
 
-**Next:** M3 — public-release readiness, not yet scoped. The gating facts, all
-verified 2026-09-11: there is no git remote, no LICENSE, no CI, no install path
-and no tag. Until those exist this project's own stated success test — "a
-stranger goes from clone to a working scoped run in under a minute" — is not
-merely unmet but impossible, since nobody can clone what is unpublished or
-legally reuse what is unlicensed.
+The remaining three are one operator-run script: `/tmp/cf-minter-release.sh`.
 
 ## Hard constraints
 
