@@ -1,8 +1,13 @@
 # Project State
 
-**Last updated:** YYYY-MM-DD
-**Active focus:** [1-3 sentences. What's actively in-flight right now.
-The first thing you'd want to know about this project today.]
+**Last updated:** 2026-09-10
+**Active focus:** M1 (the `cf-minter` dispatcher + ergonomics pass) is **complete
+and verified** — all five definition-of-done items demonstrated, 180 assertions
+green. The project is between milestones; M2 has not been scoped. The three
+ergonomics questions the brief left open are now two, since the dispatcher
+settled the surface: whether `cf-mint-token.sh`'s flag surface stays as a
+compatibility layer, and whether `profiles.conf` ships the right defaults for a
+stranger.
 
 <!-- History cap (D-0072): keep at most the current head + ~1 most-recent
      `**Prior YYYY-MM-DD —**` entry inline here. When you add a newer Prior
@@ -11,6 +16,61 @@ The first thing you'd want to know about this project today.]
      at session start), and leave a one-line pointer to it. This keeps the
      per-session read cost from growing with project age. -->
 
+
+---
+
+## Current — 2026-09-10
+
+**M1 shipped.** `cf-minter` is now a single verb-first entry point —
+`run` / `mint` / `profiles` / `list` / `burn` / `doctor` — over the two tools,
+which are unchanged and still usable directly. Definition of done, each
+demonstrated rather than reported:
+
+| DoD item | evidence |
+|---|---|
+| `extract-standalone-runner` landed | `main` contains `3e44147`; branch deleted |
+| bare `cf-minter` explains itself | prints a COMMANDS block; asserted in suite |
+| six verbs exist and route | `test/cf-minter.test.sh`, 21 assertions |
+| every refusal names the fix | 62 refusals audited; 5 terse ones given remedies (`8ed2b77`) |
+| suite green incl. SIGINT burn | 180 assertions, `ALL SUITES PASSED` |
+| README rewritten | `8896df2`; every command in it was executed first |
+
+**Two defects found and fixed while building it,** both in the cold-operator
+path the scope's under-a-minute test depends on:
+
+1. `--dry-run` required a minter credential — so the very first command the
+   README tells a newcomer to run printed a plan with its permissions silently
+   missing (measured: 0 of 2 `would resolve permission` lines without a minter,
+   2 with). The mint tool refused before resolving them and exited; the wrapper
+   carried on and reported "dry run complete". Fixed in `d10a66b` by scoping the
+   precondition to the real path — the same shape the `curl` check four lines
+   below already had. The live mint and live revoke still refuse by name, now
+   asserted.
+2. `cf()` defaulted its bearer to `$CF_MINTER_TOKEN`, which aborts under
+   `set -u` when no minter is set. Only reachable once (1) was fixed; caught by
+   the new test, not by hand.
+
+**Architecture note:** the dispatcher holds no logic — no token value, no
+network call — and two guards in its suite assert it stays that way, each
+paired with a vacuity check so a detector that stops detecting fails loudly
+instead of reporting clean.
+
+**Open, not blocking:**
+- `mental-models` pairing is 106d past its quarterly polish cadence (its content
+  is sound; the cadence is the finding). Polish belongs in the dotagent repo.
+- Two dotagent engine findings were handed off, not fixed here:
+  `pairing-polish-cadence` counts documented non-selections as selections, and
+  the retro digest crashes on a project with no `ROADMAP.md` (which the
+  operating manual permits). Brief at `/tmp/dotagent-pairings-handoff.md`.
+- The bootstrap's generated interview packs (212KB, incl. a 125KB
+  `propose-pack.md`) are committed and already stale by two pairings. Flagged
+  to the dotagent seat as a judgment call about whether they are durable
+  artifacts or scratch.
+
+**Next session:** no milestone is active. M2 needs scoping — the natural
+candidates are the two remaining ergonomics questions above, or public-release
+readiness (LICENSE, CI running the hermetic suite, a documented install path),
+which the scope names as the project's purpose but which nothing has started.
 ---
 
 ## 1. Authority surface — where to look for X
@@ -33,7 +93,7 @@ know about it.
 | **Shipped milestone history** | `.agent/ROADMAP-SHIPPED.md` (append-only `## Shipped` blocks; **not read at session start**, per D-0072; the renderer still reads it for done-resolution) |
 | **Committed work ready now (derived frontier)** | `.agent/TODO.md` (generated from ROADMAP by `roadmap-render.sh`; never hand-edited) |
 | **How an in-flight task is going (live lane narration)** | `.agent/PROJECT-STATE.md` §2a "Active lanes" (this file; one block per open task, keyed by its qualified ROADMAP task id, per D-0092) |
-| **Unratified ideas** | `.agent/IDEAS/` (one file per idea, with `ARCHIVED/`, per D-0028) |
+| **Unratified ideas** | `.agent/IDEAS/` — one file per idea, archived alongside once ratified (per D-0028). Created on demand; absent in this project so far. |
 | **[Extension: add rows for project-specific tracked surfaces]** | `.agent/[RESEARCH/ / NOTES/ / SPECS/ / etc.]` |
 
 Extensions only "exist" in the tracking system if they appear in this
