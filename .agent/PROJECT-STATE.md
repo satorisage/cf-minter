@@ -62,10 +62,27 @@ instead of reporting clean.
   `pairing-polish-cadence` counts documented non-selections as selections, and
   the retro digest crashes on a project with no `ROADMAP.md` (which the
   operating manual permits). Brief at `/tmp/dotagent-pairings-handoff.md`.
-- The bootstrap's generated interview packs (212KB, incl. a 125KB
-  `propose-pack.md`) are committed and already stale by two pairings. Flagged
-  to the dotagent seat as a judgment call about whether they are durable
-  artifacts or scratch.
+- ~~The bootstrap's generated interview packs are committed and stale.~~
+  **Resolved 2026-09-11.** The dotagent seat reframed it as an engine defect —
+  `REPORTS/` is the findings inbox, so a generated input sitting there is
+  permanent fake open work — and shipped the fix (packs now write to
+  `$XDG_CACHE_HOME/dotagent/bootstrap/<project>/`). The 228KB was removed here
+  and `.agent/REPORTS/*-pack.md` is gitignored. They regenerate on demand;
+  re-running `propose.sh` now yields 89 pairings against the 87 frozen in the
+  deleted copy, which is the staleness the finding was about.
+
+### Bootstrap provenance (2026-09-09)
+
+The deleted packs were the only record of what the corpus looked like at
+bootstrap. L185 replaces that with a stamp file, but this project predates it,
+so the non-recomputable facts are kept here instead:
+
+- Bootstrapped 2026-09-09 via `bootstrap-project.sh`, phases 0-2, in-session.
+- Pairing catalog held **87** pairings at the time (now 89 — `refactoring` and
+  `code-diagnosis` were authored 2026-09-10).
+- **3 selected:** `cloudflare-security`, `enforcement-surfaces`,
+  `mental-models`. `copy-truth` was recommended and declined.
+- Canon was at **24** principles (`PERSONAL-PRINCIPLES.md`).
 
 **Next session:** no milestone is active. M2 needs scoping — the natural
 candidates are the two remaining ergonomics questions above, or public-release

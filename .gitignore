@@ -5,3 +5,9 @@
 
 # dotagent: machine-local path stamp — must not be committed
 .agent/.project-path
+
+# dotagent: bootstrap interview packs are single-use INPUTS, not findings.
+# They now write to $XDG_CACHE_HOME/dotagent/bootstrap/<project>/; this line
+# catches any that predate that change or arrive from an older install.
+# project-brief.md is the OUTPUT and stays tracked.
+.agent/REPORTS/*-pack.md
