@@ -302,7 +302,18 @@ if [[ -z "${CF_MINTER_TOKEN:-}" ]]; then
     [[ -n "$CF_MINTER_TOKEN" ]] || die "could not read minter secret '$CF_MINTER_VAULT_SECRET' from vault '$OPS_VAULT_NAME'"
   fi
 fi
-[[ -n "${CF_MINTER_TOKEN:-}" ]] || die "no minter credential — a credential carrying \"User API Tokens:Edit\" is required to create OR delete tokens. Supply exactly one of, in this precedence: CF_MINTER_TOKEN=<value> in the environment; --minter-cmd '<command that prints the token>' (or CF_MINTER_CMD) to pull it from your own secret store; --minter-token-file <path>; or CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME for the optional Azure Key Vault path."
+# A dry run mints nothing, so it needs no minter — and refusing here would break
+# the one command a newcomer is told to run first, leaving them with a plan that
+# silently omits its permissions. Say what they will need, then show the plan.
+# Same shape as the curl precondition below: preconditions of the REAL path are
+# required on the real path only. The live mint still refuses, unchanged.
+if [[ -z "${CF_MINTER_TOKEN:-}" ]]; then
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    warn "no minter credential is configured — this preview does not need one, but a real run does. Set CF_MINTER_TOKEN, or pass --minter-cmd '<command that prints it>'."
+  else
+    die "no minter credential — a credential carrying \"User API Tokens:Edit\" is required to create OR delete tokens. Supply exactly one of, in this precedence: CF_MINTER_TOKEN=<value> in the environment; --minter-cmd '<command that prints the token>' (or CF_MINTER_CMD) to pull it from your own secret store; --minter-token-file <path>; or CF_MINTER_VAULT_SECRET + OPS_VAULT_NAME for the optional Azure Key Vault path."
+  fi
+fi
 
 # ── common preconditions ──────────────────────────────────────────────────────
 command -v jq >/dev/null 2>&1 || die "jq not found (required)"
@@ -332,7 +343,12 @@ source "$HERE/lib/cf-retry.sh"
 # exception is --burn's self-verify, which passes the burn token so it can identify
 # itself. Either way the token is only ever a header, never printed.
 cf(){
-  local method="$1" path="$2" body="${3:-}" bearer="${4:-$CF_MINTER_TOKEN}"
+  # The minter default is written ${CF_MINTER_TOKEN:-} rather than
+  # $CF_MINTER_TOKEN because a dry run never authenticates and is allowed to run
+  # without a minter at all; under `set -u` the bare form would abort here on a
+  # value this branch does not use. On a real run the variable is guaranteed set
+  # — the refusal above sees to that — so the resolved bearer is unchanged.
+  local method="$1" path="$2" body="${3:-}" bearer="${4:-${CF_MINTER_TOKEN:-}}"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     if [[ -n "$body" ]]; then
       printf '  %s+%s %s %s %s\n' "$B" "$Z" "$method" "$path" "$body"

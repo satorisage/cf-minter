@@ -438,6 +438,31 @@ rm -f "$STUB_DIR/pg.deny"
 PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN -u CF_MINTER_VAULT_SECRET -u OPS_VAULT_NAME \
   bash "$SCRIPT" --qualify-minter >"$OUT" 2>&1 </dev/null; rc=$?
 if [[ "$rc" -eq 2 ]] && grep -q "no minter credential" "$OUT"; then ok "no minter at all is a named refusal, exit 2"; else bad "missing minter: want exit 2, got $rc"; fi
+
+# A dry run mints nothing, so it must not require the credential a mint needs —
+# but it must still say one will be needed. This is the cold operator's first
+# command (the README opens with --dry-run), and requiring a minter here made it
+# print a plan with its permissions silently missing: the tool died before
+# resolving them, while the wrapper still reported "dry run complete".
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN -u CF_MINTER_CMD -u CF_MINTER_VAULT_SECRET -u OPS_VAULT_NAME \
+  bash "$SCRIPT" --dry-run --name t --perm DNS:Edit --perm Zone:Read --zone example.test >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "a dry run with NO minter still succeeds — a preview needs no credential"; else bad "dry-run without a minter: want exit 0, got $rc — $(tail -3 "$OUT")"; fi
+if [[ "$(grep -c 'would resolve permission' "$OUT")" -eq 2 ]]; then ok "…and states the full permission plan, which is the whole point of --dry-run"; else bad "dry-run without a minter omitted its permissions: $(grep -c 'would resolve permission' "$OUT") of 2"; fi
+if grep -q "no minter credential is configured" "$OUT"; then ok "…while warning that a real run will need one"; else bad "dry-run never mentioned the missing minter"; fi
+if [[ ! -s "$CALLS" ]]; then ok "…and makes zero network calls doing it"; else bad "dry-run without a minter touched the network: $(cat "$CALLS")"; fi
+
+# The relaxation above must not have reached the live path. Deleting is as
+# privileged as creating, so both are checked.
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN -u CF_MINTER_CMD -u CF_MINTER_VAULT_SECRET -u OPS_VAULT_NAME \
+  bash "$SCRIPT" --name t --perm DNS:Edit --zone example.test >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "no minter credential" "$OUT"; then ok "a LIVE mint with no minter still refuses by name — the relaxation is dry-run only"; else bad "live mint without a minter: want a named refusal, got $rc"; fi
+if [[ ! -s "$CALLS" ]]; then ok "…before any network call is made"; else bad "live mint without a minter reached the network"; fi
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" env -u CF_MINTER_TOKEN -u CF_MINTER_CMD -u CF_MINTER_VAULT_SECRET -u OPS_VAULT_NAME \
+  bash "$SCRIPT" --revoke sometoken >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "no minter credential" "$OUT"; then ok "…and so does a live revoke, since deleting is as privileged as creating"; else bad "live revoke without a minter: want a named refusal, got $rc"; fi
 if grep -q -- "--minter-cmd" "$OUT" && grep -q "CF_MINTER_TOKEN" "$OUT" && [[ ! -s "$CALLS" ]]; then ok "…listing every supported way to supply one, before any network call"; else bad "the refusal does not name the alternatives"; fi
 
 printf '%s\n' "minter-from-a-store" >"$STUB_DIR/minter.txt"
