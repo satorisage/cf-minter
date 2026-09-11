@@ -406,7 +406,14 @@ if [[ "$rc" -eq 0 ]]; then ok "--value-file --no-print-value mint exits 0 (the f
 if [[ "$(cat "$VFILE" 2>/dev/null)" == "$FAKE_TOKEN" ]]; then
   ok "the file receives the token byte-exactly"
 else bad "value file content wrong: [$(cat "$VFILE" 2>/dev/null)]"; fi
-PERMS_OCTAL="$(stat -f '%Lp' "$VFILE" 2>/dev/null || stat -c '%a' "$VFILE" 2>/dev/null)"
+# Mode, portably. Exit status is NOT a safe discriminator between the two stat
+# dialects: GNU's `stat -f` rejects the BSD format string but still prints a
+# `File: "..."` line to STDOUT before failing, so `$(bsd || gnu)` captures that
+# junk concatenated with the real answer. BSD's `stat -c` fails cleanly with
+# empty stdout. So validate the VALUE rather than trusting $? — whichever
+# dialect yields octal digits is the right one.
+PERMS_OCTAL="$(stat -c '%a' "$VFILE" 2>/dev/null || true)"
+[[ "$PERMS_OCTAL" =~ ^[0-7]+$ ]] || PERMS_OCTAL="$(stat -f '%Lp' "$VFILE" 2>/dev/null || true)"
 if [[ "$PERMS_OCTAL" == "600" ]]; then ok "…at mode 0600 (private to the minting user)"; else bad "value file mode is $PERMS_OCTAL, want 600"; fi
 if ! grep -qF "$FAKE_TOKEN" "$OUT"; then ok "…and the value still appears nowhere in the output"; else bad "the value leaked into stdout"; fi
 
