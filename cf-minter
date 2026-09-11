@@ -14,7 +14,19 @@
 # this file is the mistake it is designed to prevent.
 
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks. The common install is a link on PATH
+# (ln -s /opt/cf-minter/cf-minter /usr/local/bin/cf-minter), and BASH_SOURCE[0] is the link's
+# own path, not the target's — so without this the siblings beside the real
+# script are invisible. readlink is used without -f because BSD's lacks it;
+# the loop is the portable equivalent and also handles a chain of links.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+HERE="$(cd -P "$(dirname "$_src")" && pwd)"
+unset _src _dir
 RUN="$HERE/cf-scoped-run.sh"
 MINT="$HERE/cf-mint-token.sh"
 

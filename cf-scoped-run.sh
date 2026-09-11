@@ -123,7 +123,19 @@ need_arg(){
     || die "$1 requires a value (got '${2:-}')"
 }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks. The common install is a link on PATH
+# (ln -s /opt/cf-minter/cf-scoped-run.sh /usr/local/bin/cf-scoped-run.sh), and BASH_SOURCE[0] is the link's
+# own path, not the target's — so without this the siblings beside the real
+# script are invisible. readlink is used without -f because BSD's lacks it;
+# the loop is the portable equivalent and also handles a chain of links.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+HERE="$(cd -P "$(dirname "$_src")" && pwd)"
+unset _src _dir
 CF_MINT="${CF_MINT_TOKEN_SCRIPT:-$HERE/cf-mint-token.sh}"
 [[ -x "$CF_MINT" || -f "$CF_MINT" ]] || die "cf-mint-token.sh not found at '$CF_MINT'"
 

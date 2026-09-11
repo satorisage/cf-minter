@@ -152,5 +152,27 @@ grep -qE 'CF_SCOPED_TOKEN' <<<"$(printf 'x(){ export CF_SCOPED_TOKEN=1; }')" \
   || bad "the credential guard no longer detects anything — it is vacuous"
 
 echo
+echo "installed as a symlink on PATH (the common install):"
+# ln -s /opt/cf-minter/cf-minter /usr/local/bin/cf-minter is how anyone puts this
+# on PATH, and BASH_SOURCE[0] is then the LINK's path, not the target's — so the
+# sibling tools beside the real script are invisible unless the link is resolved.
+LINKDIR="$(mktemp -d)"
+ln -s "$BOX/cf-minter" "$LINKDIR/cf-minter"
+rm -f "$BOX/called-tool" "$BOX/called-args"
+PATH="$LINKDIR:$PATH" cf-minter profiles >/dev/null 2>&1; rc=$?
+if [[ "$rc" -eq 0 ]]; then ok "a symlinked cf-minter runs at all"; else bad "symlinked cf-minter exited $rc"; fi
+if [[ "$(cat "$BOX/called-tool" 2>/dev/null)" == "cf-scoped-run.sh" ]]; then
+  ok "…and resolves its siblings next to the TARGET, not next to the link"
+else bad "symlinked cf-minter reached '$(cat "$BOX/called-tool" 2>/dev/null)', wanted cf-scoped-run.sh"; fi
+# A chain of links is the same problem twice; the resolver loops for this reason.
+ln -s "$LINKDIR/cf-minter" "$LINKDIR/cf-minter-2"
+rm -f "$BOX/called-tool"
+PATH="$LINKDIR:$PATH" cf-minter-2 profiles >/dev/null 2>&1
+if [[ "$(cat "$BOX/called-tool" 2>/dev/null)" == "cf-scoped-run.sh" ]]; then
+  ok "…through a chain of symlinks, not just one"
+else bad "a symlink-to-a-symlink did not resolve"; fi
+rm -rf "$LINKDIR"
+
+echo
 printf 'cf-minter dispatcher tests: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
