@@ -63,26 +63,34 @@ instead of reporting clean.
   the retro digest crashes on a project with no `ROADMAP.md` (which the
   operating manual permits). Brief at `/tmp/dotagent-pairings-handoff.md`.
 - ~~The bootstrap's generated interview packs are committed and stale.~~
-  **Resolved 2026-09-11.** The dotagent seat reframed it as an engine defect —
-  `REPORTS/` is the findings inbox, so a generated input sitting there is
-  permanent fake open work — and shipped the fix (packs now write to
-  `$XDG_CACHE_HOME/dotagent/bootstrap/<project>/`). The 228KB was removed here
-  and `.agent/REPORTS/*-pack.md` is gitignored. They regenerate on demand;
-  re-running `propose.sh` now yields 89 pairings against the 87 frozen in the
-  deleted copy, which is the staleness the finding was about.
+  **Resolved 2026-09-11.** The governing rule predates the whole exchange:
+  **D-0017 part 3, Binding since 2026-05-27** — prompt-packs are ephemeral,
+  reproducible from their engines, and "do not get archived", because `REPORTS/`
+  is the findings inbox and a generated input sitting there is permanent fake
+  open work. Verified at source. `bootstrap-project.sh` was the outlier for
+  three and a half months, because the rule was enforced by memory alone; the
+  dotagent seat has now made the violation unrepresentable (packs write to
+  `$XDG_CACHE_HOME/dotagent/bootstrap/<project>/`). So the 228KB removed here
+  was a standing violation, not an open question. They regenerate on demand:
+  `propose.sh` now emits 89 pairings against the **86** frozen in the deleted
+  copy, which is the staleness the finding was about.
 
-### Bootstrap provenance (2026-09-09)
+### Bootstrap provenance
 
-The deleted packs were the only record of what the corpus looked like at
-bootstrap. L185 replaces that with a stamp file, but this project predates it,
-so the non-recomputable facts are kept here instead:
+Recorded in `.agent/.bootstrap-stamp` (the canonical home, per the engine's
+D-0017 fix). This project predates that mechanism, so the stamp was
+reconstructed rather than emitted — every field measured, none assumed:
 
-- Bootstrapped 2026-09-09 via `bootstrap-project.sh`, phases 0-2, in-session.
-- Pairing catalog held **87** pairings at the time (now 89 — `refactoring` and
-  `code-diagnosis` were authored 2026-09-10).
-- **3 selected:** `cloudflare-security`, `enforcement-surfaces`,
-  `mental-models`. `copy-truth` was recommended and declined.
-- Canon was at **24** principles (`PERSONAL-PRINCIPLES.md`).
+- `dotagent: 968eb42` — recovered from `~/.dotagent`'s `release` reflog, which
+  shows that commit as HEAD from 2026-09-07 14:59 to 2026-09-09 18:29; the
+  bootstrap ran 14:24-14:54 on 09-09, inside that window. Confirmed by
+  comparing `968eb42`'s `pairings/` tree against the pairing list in the
+  now-deleted pack (recoverable at `a26eedd`): identical, 86 for 86.
+- `pairings-available: 86` — not 87 as first supposed. `pull-based-deployment`
+  reached dev on 09-08 but had not been promoted to `release`, and the
+  bootstrap reads the release checkout.
+- `pairings-list-sha: 9e43c9f76c67` — computed by the stamp writer's own
+  method, validated by reproducing today's `5fd2e6dc6613` with the same steps.
 
 **Next session:** no milestone is active. M2 needs scoping — the natural
 candidates are the two remaining ergonomics questions above, or public-release
