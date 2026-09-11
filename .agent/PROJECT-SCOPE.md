@@ -6,7 +6,7 @@
 
 ## Active milestone
 
-**Milestone:** M3 — public-release readiness
+**Milestone:** M3 — public-release readiness. **Closed 2026-09-11.**
 **Ratified:** 2026-09-11, via walkthrough. M1 and M2 complete.
 
 Five rulings, all enacted in `21f0601` except the last step, which is the
@@ -34,11 +34,19 @@ operator's to run:
 - [x] CI workflow, both platforms, no secrets
 - [x] Install section, verified working via symlink
 - [x] public payload decided; no tracked file carries a machine path
-- [ ] remote created and `main` pushed
-- [ ] CI observed green on the remote
-- [ ] visibility flipped to public, `v0.1.0` tagged
+- [x] remote created and `main` pushed — `github.com/satorisage/cf-minter`
+- [x] CI observed green on the remote — run 34586267000, both legs:
+      `ubuntu-latest` (bash 5.2.21) and `macos-latest` (bash 3.2.57), 183
+      assertions each
+- [x] visibility flipped to public, `v0.1.0` tagged and released
 
-The remaining three are one operator-run script: `/tmp/cf-minter-release.sh`.
+**M3 closed 2026-09-11.** Verified as a stranger rather than asserted: a fresh
+clone of the public URL, symlinked onto `PATH`, runs `doctor`, `profiles`,
+`run --dry-run` and the full suite correctly with no credential in the
+environment. The success test this project has carried since 2026-09-09 is met.
+
+**No milestone is active.** Candidate work is in PROJECT-STATE §7; none of it
+is committed.
 
 ## Hard constraints
 

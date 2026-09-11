@@ -1,16 +1,15 @@
 # Project State
 
 **Last updated:** 2026-09-11
-**Active focus:** M1 and M2 are both **complete**. Every ergonomics question the
-vision brief left open is now answered and enacted — see PROJECT-SCOPE.md's
-Active milestone for the three M2 rulings. 180 assertions green.
+**Active focus:** **v0.1.0 is released.** https://github.com/satorisage/cf-minter
+is public, MIT-licensed, CI green on Linux and macOS. M1, M2 and M3 are all
+complete, and the project's founding success test — a stranger goes from clone
+to a working scoped run in under a minute — has been run from a fresh clone and
+passes.
 
-The project is between milestones. **M3 is public-release readiness and is not
-scoped yet**, and it is the milestone that matters: this repo has no remote, no
-LICENSE, no CI, no install path and no tag, which makes the scope's own success
-test ("a stranger goes from clone to a working scoped run in under a minute")
-impossible rather than merely unmet. Everything the tool needs to *work* is
-done; nothing it needs to be *obtainable* has started.
+No milestone is active. There is no committed next milestone; the tool does what
+it was built to do and is obtainable by anyone. Candidate work, none of it
+urgent, is in §7.
 
 <!-- History cap (D-0072): keep at most the current head + ~1 most-recent
      `**Prior YYYY-MM-DD —**` entry inline here. When you add a newer Prior
@@ -22,7 +21,46 @@ done; nothing it needs to be *obtainable* has started.
 
 ---
 
-## Current — 2026-09-10
+## Current — 2026-09-11
+
+**M3 shipped: the tool became obtainable.** MIT licence; GitHub Actions running
+the hermetic suite on `ubuntu-latest` and `macos-latest` (no secrets needed —
+`curl` and `az` are PATH stubs, so a full run mints, uses and deletes nothing);
+an Install section documenting clone + symlink; and the repo published, made
+public and tagged `v0.1.0`.
+
+Deliberately no `curl | bash` installer. A tool whose job is careful credential
+handling should not open by asking the reader to pipe a remote script into their
+shell — "read it before you trust it" is the actual pitch, and ~1000 lines of
+auditable shell is what backs it.
+
+**Verified as a stranger, not asserted:** cloned the public URL to a fresh
+directory, symlinked the entry point onto `PATH`, and ran `doctor`, `profiles`,
+`run --dry-run` and the full suite with no credential in the environment. All
+correct; 183 assertions pass.
+
+**Four real bugs were found across M1-M3, none of them findable by reading:**
+
+| bug | how it surfaced |
+|---|---|
+| `--dry-run` required a credential, so the README's *first* command printed a plan with its permissions silently missing | running it the way a newcomer would |
+| `cf()` aborted under `set -u` when no minter was set | only reachable once the first was fixed; caught by a new test, not by hand |
+| a test read a file mode with BSD `stat` syntax; GNU `stat` rejects it but still prints to stdout, poisoning the capture | first time the suite ran outside macOS |
+| a symlink on `PATH` broke the tool outright — `BASH_SOURCE[0]` is the link's path, so sibling tools were invisible | asking "can this go on PATH?" while writing the install docs |
+
+The last two were found while *writing the release walkthrough*, because each
+question carried a factual claim that could not be answered from memory. The
+symlink bug would have been a first-five-minutes failure for every user who
+installed it the normal way.
+
+M2 preceded this and was three rulings rather than a build — see
+PROJECT-SCOPE.md history. Its content: `cf-mint-token.sh` stays supported but
+stops being taught, `profiles.conf` ships its seven as a declared starting set,
+and the repo ships its own tracking.
+
+---
+
+## Prior — 2026-09-10
 
 **M1 shipped.** `cf-minter` is now a single verb-first entry point —
 `run` / `mint` / `profiles` / `list` / `burn` / `doctor` — over the two tools,
@@ -64,7 +102,8 @@ instead of reporting clean.
 - Two dotagent engine findings were handed off, not fixed here:
   `pairing-polish-cadence` counts documented non-selections as selections, and
   the retro digest crashes on a project with no `ROADMAP.md` (which the
-  operating manual permits). Brief at `/tmp/dotagent-pairings-handoff.md`.
+  operating manual permits). Both were reported upstream and subsequently fixed there; the
+  handoff brief was ephemeral and is not kept here.
 - ~~The bootstrap's generated interview packs are committed and stale.~~
   **Resolved 2026-09-11.** The governing rule predates the whole exchange:
   **D-0017 part 3, Binding since 2026-05-27** — prompt-packs are ephemeral,
@@ -95,12 +134,8 @@ reconstructed rather than emitted — every field measured, none assumed:
 - `pairings-list-sha: 9e43c9f76c67` — computed by the stamp writer's own
   method, validated by reproducing today's `5fd2e6dc6613` with the same steps.
 
-**Next session:** scope M3 — public-release readiness. The decisions it needs,
-none of which are mine to make: which licence; where the remote lives (GitHub?
-under what name?); whether CI is GitHub Actions; what the install path is
-(clone, `curl | bash`, Homebrew tap); and whether `.agent/` + `CLAUDE.md` still
-ship once the repo is genuinely public — that last one was deliberately deferred
-from M2 on the grounds that it is premature while the repo is private.
+**No committed next milestone.** The tool is finished for its stated purpose
+and is publicly obtainable. Candidates, all optional, are listed in §7.
 ---
 
 ## 1. Authority surface — where to look for X
@@ -114,89 +149,38 @@ know about it.
 |---|---|
 | **Scope, principles, hard constraints, criticality rubric** | `.agent/PROJECT-SCOPE.md` |
 | **Current state, in-flight work, next session plan** | `.agent/PROJECT-STATE.md` (this file) |
-| **Rotated state narrative (prior/interstitial history)** | `.agent/PROJECT-STATE-HISTORY.md` (append-only; **not read at session start**, per D-0072; present once the inline Prior stack first rotates) |
 | **All ratified design decisions** | `.agent/DECISIONS/` (one file per decision; index in `DECISIONS/README.md`) |
 | **Open check-ins awaiting input** | `.agent/CHECKINS/` (at root; archived live in `CHECKINS/ARCHIVED/`) |
-| **Generated audit / inspect / sweep reports** | `.agent/REPORTS/` |
-| **Ratified work-structure (milestone→task tree, depends-edges)** | `.agent/ROADMAP.md` (canonical when present; Active/Loose/Intake/Backlog + a pointer to shipped history, per D-0050/D-0093) |
-| **Work a lane found but nobody has sequenced yet** | `.agent/ROADMAP.md` `## Intake` (the admission inbox; renders to no part of TODO.md until the seat promotes it, per D-0093) |
-| **Shipped milestone history** | `.agent/ROADMAP-SHIPPED.md` (append-only `## Shipped` blocks; **not read at session start**, per D-0072; the renderer still reads it for done-resolution) |
-| **Committed work ready now (derived frontier)** | `.agent/TODO.md` (generated from ROADMAP by `roadmap-render.sh`; never hand-edited) |
-| **How an in-flight task is going (live lane narration)** | `.agent/PROJECT-STATE.md` §2a "Active lanes" (this file; one block per open task, keyed by its qualified ROADMAP task id, per D-0092) |
-| **Unratified ideas** | `.agent/IDEAS/` — one file per idea, archived alongside once ratified (per D-0028). Created on demand; absent in this project so far. |
-| **[Extension: add rows for project-specific tracked surfaces]** | `.agent/[RESEARCH/ / NOTES/ / SPECS/ / etc.]` |
+| **Generated audit / inspect / sweep reports** | `.agent/REPORTS/` (dispositioned ones archive to `REPORTS/ARCHIVED/`; tooling sweeps are local-only and untracked) |
+| **The vision this was built from** | `.agent/REPORTS/project-brief.md` |
+| **What the corpus looked like at bootstrap** | `.agent/.bootstrap-stamp` |
 
-Extensions only "exist" in the tracking system if they appear in this
-table. The dashboard reads this table to know what to render.
+This project does not use a ROADMAP/TODO work-structure tree — it is small
+enough that the milestone and its done-when live in `PROJECT-SCOPE.md`
+directly. Rows for those surfaces are therefore absent rather than empty.
 
 ---
 
 ## 2. Active milestone
 
-**Active = ROADMAP `## Active`** → see `.agent/ROADMAP.md` (if the project
-uses ROADMAP). One-line pointer only: name the active milestone and its
-ready/blocked frontier. Per-task DoD (`done-when:`) and progress live in
-ROADMAP — do **not** duplicate the DoD checklist here (D-0050 dissolved the
-old lockstep-with-SCOPE mandate, a Principle-7 violation).
+**Milestone:** none. M3 closed 2026-09-11 with the `v0.1.0` release.
+**Active blockers:** none.
 
-**Milestone:** [M<n> — short title; pointer to ROADMAP]
-**Active blockers:** [list, or "none"]
-
-(Projects not using ROADMAP may keep a short DoD list here instead.)
+This project does not use `ROADMAP.md`; the closed milestones and their
+done-when lists are in `PROJECT-SCOPE.md` (`## Active milestone`, rewritten per
+milestone) and summarised in §6 below.
 
 ---
 
 ## 2a. Active lanes
 
-Live narration for work **in flight right now** — one `###` block per open
-task, keyed by the **qualified ROADMAP task id** (`M30.T2`, `L8`): the same
-identity `TODO.md` renders at the head of each frontier line (D-0091), so the
-lane and the line you picked it from are the same address.
-
-An entry **references** its task by id and never restates it (Principle 7,
-one fact one place). The ROADMAP task line owns *what the work is*; the lane
-entry owns *how it is going* — what the lane found, what it corrected at
-source, what is still open. That split is what keeps frontier lines
-scannable; without it the narration lands in the task line and the board
-stops being pick-one-legible (D-0092).
-
-```
-### M<n>.T<k>
-- YYYY-MM-DD — what this lane found / corrected at source / left open
-- YYYY-MM-DD — the next thing worth knowing before picking the task back up
-```
-
-**Write:** whenever a live task produces a fact the next person needs and the
-task line is not the place for it. `drift-check/checks/roadmap-grain.sh
---extract <task-id>` does the move mechanically for a line that has already
-bloated.
-
-**Retire:** delete the block when its task closes. Entries are transient by
-construction — the durable residue has already landed in the task's
-`— done: <ref>` tail or the milestone's `**Done:**` line (D-0055), so a lane
-block outliving its task is duplication, not history.
-
-none.
+none — no work in flight.
 
 ---
 
 ## 3. Open check-ins
 
-(Files at the root of `.agent/CHECKINS/` that are not yet archived.
-Each represents a question awaiting your input.)
-
-- `<date>-<slug>.md` — [one-line summary]
-
-Or: "none" if no active check-ins.
-
----
-
-## 4. (Dissolved per D-0050)
-
-Cross-session deferred work no longer lives in a narrated §4 thread. Route
-it by kind: deferred-but-committed → a `## Backlog` task in `.agent/ROADMAP.md`
-(naming its trigger); unratified → `.agent/IDEAS/`; decided-but-unbuilt → a
-`DECISION`. (Projects not using ROADMAP may retain a §4 list.)
+none — no questions awaiting input.
 
 ---
 
@@ -210,13 +194,31 @@ What to do first when next session starts. 1-3 lines. Can be empty.
      The dashboard renders any section it finds; canonical sections
      (1-5) are guaranteed to exist. -->
 
-## 6. Recent milestones (one-liner index, optional)
+## 6. Milestones
 
-If the project uses ROADMAP, shipped-milestone history lives in ROADMAP
-`## Shipped` (D-0050) — don't duplicate it here. Otherwise:
+- **M1** (2026-09-10) — one entry point. `cf-minter` dispatches six verbs
+  (`run` / `mint` / `profiles` / `list` / `burn` / `doctor`) over the two tools,
+  which were not modified. Closed.
+- **M2** (2026-09-11) — the open ergonomics questions answered. Three rulings,
+  no code: `cf-mint-token.sh` supported but not taught; `profiles.conf` ships
+  its seven as a declared starting set; the repo ships its own tracking. Closed.
+- **M3** (2026-09-11) — obtainable. MIT, CI on two platforms, documented
+  install, public repo, `v0.1.0` tagged. Closed.
 
-- **M[N]** ([YYYY-MM-DD]) — [one-line summary]. [Closed / in-progress.]
+## 7. Candidate work — none committed, none urgent
 
-## 7. Known issues / current debt (optional)
+The tool is finished for its stated purpose. These are noted so they are not
+rediscovered, not because anything is owed:
 
-[Carry-forward issues that aren't blockers but are tracked.]
+- **`profiles.conf` coverage.** Seven profiles ship. Cache purge, R2, Workers KV
+  and Logpush have no profile. Deliberately not added: permission names resolve
+  by a live catalogue read that `--dry-run` does not perform, so a name cannot
+  be verified offline, and guessing at vendor strings is the failure this tool
+  refuses by design. Each new profile needs one real mint to verify.
+- **Homebrew tap.** The install is clone + symlink. A tap is the right second
+  step *if* anyone asks; building one nobody has asked for is inventory.
+- **`cf-minter` covers 8 of `cf-mint-token.sh`'s 17 flags.** By design — it
+  covers the common path, and the README says so and points at `--help`. Worth
+  revisiting only if the uncovered nine turn out to be reached for often.
+- **No `CONTRIBUTING.md` or issue templates.** Add if the repo attracts any
+  actual contributors; premature otherwise.
