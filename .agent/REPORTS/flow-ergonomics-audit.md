@@ -108,3 +108,42 @@ load under `compinit`, and the data it consumes is asserted; a true interactive
 `zpty` capture of its candidate list was attempted and did not produce output
 under `zsh -f`, so **zsh completion is not proven by an interactive capture** —
 it wants one manual TAB to confirm.
+
+## Correction — 2026-09-14: the zsh completion was broken when it shipped
+
+The bound above ("wants one manual TAB to confirm") was the right instinct and
+too soft. The operator pressed TAB and got a directory listing. The completion
+did not work at all.
+
+**Cause, found by instrumenting rather than theorising.** `_arguments` reads the
+command line from `words[1]`, so it saw `cf-minter` as the command and every
+verb as an unexpected argument, matched nothing, and fell through to filename
+completion. Fixed by dropping the dispatcher's own word before dispatching to a
+verb's flag specs (`shift words; (( CURRENT-- ))`). Two further defects were
+found on the way: `_cf_minter_profiles` built its candidate list in a `cmd |
+while read` pipeline, so the rows were discarded with the subshell; and the flag
+specs were passed to `_arguments` as an expanded array rather than as literal
+arguments.
+
+**Why every test passed anyway.** The checks were `zsh -n` (it parses) and a
+compinit load (it registers). Both are derived from the same assumption the
+completion itself was making, so they could only confirm the two agreed. A
+verifier that shares its subject's blind spot is not evidence.
+
+**Replaced with `test/zsh-completion.test.sh`**, which drives a real interactive
+zsh through a pseudo-terminal, sends an actual TAB, and asserts the candidate
+list — including an explicit assertion that no filename appears among the
+profile candidates, which is the signature of this exact failure. Verified to
+bite: reintroducing the `shift words` omission turns 9 passed into 7 failed.
+It skips **loudly** where zsh or zsh/zpty is absent, never silently.
+
+**Suite: 217 assertions, 0 failed** (183 before this work). CI: macos-latest
+runs the new suite; ubuntu-latest has no zsh and prints the skip.
+
+The dispatcher's `zsh -n` check survives as a fast tripwire, with a comment
+saying plainly that parsing is not evidence of completing.
+
+**Handoff defect, separately.** The verification command in the first handoff
+joined setup and use with `&&` on one line, so `compinit` had not run when TAB
+was pressed — the instruction could not have worked as written. A throwaway
+`ZDOTDIR` shell is the correct shape and is what the test now uses.

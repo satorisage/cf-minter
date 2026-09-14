@@ -231,9 +231,13 @@ done
 if bash -n "$COMPDIR/cf-minter.bash" 2>/dev/null; then
   ok "completions/cf-minter.bash parses as bash"
 else bad "completions/cf-minter.bash has a syntax error"; fi
+# Parsing is NOT evidence that a completion completes: the first _cf-minter
+# passed this check and produced a directory listing on TAB. Whether it actually
+# offers the right candidates is proven in zsh-completion.test.sh, which drives
+# a real shell through a pty. This stays only as a fast syntax tripwire.
 if command -v zsh >/dev/null 2>&1; then
   if zsh -n "$COMPDIR/_cf-minter" 2>/dev/null; then
-    ok "completions/_cf-minter parses as zsh"
+    ok "completions/_cf-minter parses as zsh (behaviour: zsh-completion.test.sh)"
   else bad "completions/_cf-minter has a syntax error"; fi
 else
   ok "zsh absent — _cf-minter syntax check skipped (not a failure)"

@@ -11,11 +11,16 @@
 # profile grants is visible at the moment it is chosen. Nothing here touches the
 # network — token ids are deliberately not completed.
 
+# Fed by a process substitution, not a pipeline: a `cmd | while read` loop runs
+# in a subshell, so every row it collected would be discarded at the pipe's end
+# and the completion would silently fall through to filenames.
 _cf_minter_profiles(){
-  local -a rows; local line name scope ttl why
-  cf-minter profiles --names 2>/dev/null | while IFS=$'\t' read -r name scope ttl why; do
+  local -a rows; local name scope ttl why
+  while IFS=$'\t' read -r name scope ttl why; do
+    [[ -n "$name" ]] || continue
     rows+=("${name}:${scope} · ${ttl} · ${why}")
-  done
+  done < <(cf-minter profiles --names 2>/dev/null)
+  (( ${#rows} )) || return 1
   _describe -t profiles 'profile' rows
 }
 
@@ -30,19 +35,6 @@ _cf-minter(){
       shift $i words; (( CURRENT -= i )); _normal; return
     fi
   done
-
-  local -a scope_opts
-  scope_opts=(
-    '--profile[named purpose to mint]:profile:_cf_minter_profiles'
-    '--zone[zone a zone-scoped profile applies to]:zone name:'
-    '--zone-id[the same zone, by id]:zone id:'
-    '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)'
-    '--slug[label folded into the token name]:slug:'
-    '--minter-cmd[command that prints your minter credential]:command:_cmdstring'
-    '--minter-token-file[file holding your minter credential]:file:_files'
-    '--dry-run[show the plan; mint nothing, run nothing]'
-    '--help[help for this command]'
-  )
 
   if (( CURRENT == 2 )); then
     local -a verbs
@@ -59,13 +51,48 @@ _cf-minter(){
     return
   fi
 
-  case "${words[2]}" in
-    run)      _arguments $scope_opts '*::command:_normal' ;;
-    mint)     _arguments $scope_opts ;;
-    profiles) _arguments '--names[one tab-separated record per profile, for scripts]' '--help[help for this command]' ;;
-    list)     _arguments '--stale[only leftovers from runs whose burn failed]' '--help[help for this command]' ;;
-    burn)     _arguments '--stale[sweep leftovers from runs whose burn failed]' '--help[help for this command]' ;;
-    doctor)   _arguments '--help[help for this command]' ;;
+  # _arguments reads the command line from words[1], so it would otherwise see
+  # "cf-minter" as the command and the verb as an unexpected argument, match
+  # nothing, and fall through to filenames. Dropping the dispatcher's own word
+  # puts the verb in the command position, where its flags are declared.
+  local verb="${words[2]}"
+  shift words
+  (( CURRENT-- ))
+
+  # The mint-scope flags are spelled out for each verb rather than shared from a
+  # variable: _arguments takes its specs as literal arguments, and feeding it an
+  # expanded array is the difference between this working and silently offering
+  # filenames.
+  case "$verb" in
+    run)
+      _arguments -s \
+        '--profile[named purpose to mint]:profile:_cf_minter_profiles' \
+        '--zone[zone a zone-scoped profile applies to]:zone name:' \
+        '--zone-id[the same zone, by id]:zone id:' \
+        '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)' \
+        '--slug[label folded into the token name]:slug:' \
+        '--minter-cmd[command that prints your minter credential]:command:' \
+        '--minter-token-file[file holding your minter credential]:file:_files' \
+        '--dry-run[show the plan; mint nothing, run nothing]' \
+        '--help[help for this command]' \
+        '*::wrapped command:_normal'
+      ;;
+    mint)
+      _arguments -s \
+        '--profile[named purpose to mint]:profile:_cf_minter_profiles' \
+        '--zone[zone a zone-scoped profile applies to]:zone name:' \
+        '--zone-id[the same zone, by id]:zone id:' \
+        '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)' \
+        '--slug[label folded into the token name]:slug:' \
+        '--minter-cmd[command that prints your minter credential]:command:' \
+        '--minter-token-file[file holding your minter credential]:file:_files' \
+        '--dry-run[show the plan; mint nothing, run nothing]' \
+        '--help[help for this command]'
+      ;;
+    profiles) _arguments -s '--names[one tab-separated record per profile, for scripts]' '--help[help for this command]' ;;
+    list)     _arguments -s '--stale[only leftovers from runs whose burn failed]' '--help[help for this command]' ;;
+    burn)     _arguments -s '--stale[sweep leftovers from runs whose burn failed]' '--help[help for this command]' ;;
+    doctor)   _arguments -s '--help[help for this command]' ;;
   esac
 }
 
