@@ -33,6 +33,24 @@ directory and the link.
 Needs `bash`, `curl` and `jq`. `cf-minter doctor` checks all three and tells you
 what is missing.
 
+### Shell completion (optional)
+
+Completes the commands, their flags, and your profile names — with what each
+profile reaches shown beside it in `zsh`, since choosing a profile is choosing a
+blast radius.
+
+```bash
+# zsh — in ~/.zshrc, before compinit
+fpath=(~/.local/share/cf-minter/completions $fpath)
+
+# bash — in ~/.bashrc
+source ~/.local/share/cf-minter/completions/cf-minter.bash
+```
+
+Profile names come from `cf-minter profiles --names`, so a profile you add to
+`profiles.conf` completes immediately with no second file to edit. Completion
+never makes a network call, which is why token ids are not completed.
+
 **Read it before you trust it.** This tool asks you for a credential that can
 create and delete other credentials, so the whole thing is ~1000 lines of shell
 you can audit in one sitting. That is deliberate, and it is why there is no

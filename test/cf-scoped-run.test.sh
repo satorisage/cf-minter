@@ -251,6 +251,50 @@ run_scoped "$OUT" --profile no-such-profile --zone-id z1 -- true; rc=$?
 if [[ "$rc" -eq 2 ]] && grep -q "unknown profile 'no-such-profile'" "$OUT"; then ok "an unknown profile is refused BY NAME"; else bad "unknown profile: want exit 2 + named refusal, got $rc"; fi
 if grep -q "Known profiles:" "$OUT" && [[ ! -s "$CALLS" ]]; then ok "…listing the known ones, before any network call"; else bad "unknown profile did not list alternatives or hit the network"; fi
 
+# The listing answers "how far does this reach" at the moment of choosing, so
+# the reach has to be IN it — split by level, because the level decides how far
+# a mistake goes. Asserted on the real profiles.conf: dns-edit changes DNS and
+# only reads Zone, and printing that the other way round would be a lie about a
+# blast radius.
+run_scoped "$OUT" --list-profiles
+if grep -qE '^[[:space:]]*changes[[:space:]]+.*DNS' "$OUT" && grep -qE '^[[:space:]]*reads[[:space:]]+' "$OUT"; then
+  ok "…splitting each profile's reach into what it changes and what it reads"
+else bad "profile listing does not separate changed from read permissions"; fi
+if grep -qE '^[[:space:]]*reads[[:space:]]+DNS, Zone' "$OUT"; then
+  ok "…and a read-only profile shows no 'changes' reach at all"
+else bad "dns-read did not render as read-only"; fi
+
+# The profile set the run under test actually reads — the denominator for the
+# conservation check below. Counting against the file the tool reads, rather
+# than against the tool's own output, is the whole point: a parser that silently
+# skipped a block would otherwise agree with itself.
+PROFILES_SRC="$(cd "$(dirname "$SCRIPT")" && pwd)/profiles.conf"
+
+# The machine-readable emit is the contract shell completion depends on, which
+# is why it exists: completion must never become a second parser of
+# profiles.conf. One record per profile, tab-separated, no decoration.
+run_scoped "$OUT" --profile-names; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]]; then ok "--profile-names is offline"; else bad "--profile-names: exit $rc, calls $(cat "$CALLS")"; fi
+if [[ "$(grep -c . "$OUT")" -eq "$(grep -c '^profile:' "$PROFILES_SRC")" ]]; then
+  ok "…emitting exactly one record per profile the file declares"
+else bad "--profile-names emitted $(grep -c . "$OUT") records for $(grep -c '^profile:' "$PROFILES_SRC") profiles"; fi
+if awk -F'\t' 'NF!=4{exit 1}' "$OUT"; then
+  ok "…every record carrying name, scope, ttl and purpose as four tab-separated fields"
+else bad "--profile-names emitted a record without exactly 4 tab-separated fields"; fi
+if ! grep -qP '\033' "$OUT" 2>/dev/null && ! grep -q '==' "$OUT"; then
+  ok "…with no colour or header, safe for a program to read"
+else bad "--profile-names emitted decoration"; fi
+
+# A typo should be answered, not just rejected. The refusal still refuses —
+# the suggestion only rides along with it.
+run_scoped "$OUT" --profile dns --zone-id z1 -- true; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "Did you mean 'dns-edit'" "$OUT"; then
+  ok "a near-miss profile name is answered with the nearest real one"
+else bad "near-miss profile: want exit 2 + a suggestion, got $rc"; fi
+if [[ "$rc" -eq 2 ]] && grep -q "Known profiles:" "$OUT"; then
+  ok "…without replacing the full list, and still a refusal"
+else bad "the suggestion swallowed the refusal or the profile list"; fi
+
 run_scoped "$OUT" --profile dns-edit -- true; rc=$?
 if [[ "$rc" -eq 2 ]] && grep -q "zone-scoped and no zone was named" "$OUT"; then ok "a zone profile with no zone is refused (no accidental account-wide reach)"; else bad "zoneless zone-profile: want exit 2, got $rc"; fi
 

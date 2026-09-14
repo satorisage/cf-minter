@@ -35,6 +35,11 @@ B=$'\033[1m'; D=$'\033[2m'; Z=$'\033[0m'
 
 die(){ printf '%serror:%s %s\n' "$B" "$Z" "$1" >&2; exit "${2:-2}"; }
 
+# wants_help: did the operator ask about this verb rather than invoke it? Only
+# a leading -h/--help counts — a --help further along belongs to the wrapped
+# command, which this tool must never intercept.
+wants_help(){ [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; }
+
 usage(){
   cat <<USAGE
 ${B}cf-minter${Z} — a Cloudflare credential that exists only while your job runs.
@@ -87,17 +92,26 @@ main(){
       printf 'cf-minter (dispatcher) — see %s and %s for the tools it drives\n' \
         "$(basename "$RUN")" "$(basename "$MINT")"; exit 0 ;;
 
-    run)      exec "$RUN" "$@" ;;
-    mint)     exec "$RUN" --mint-only "$@" ;;
-    profiles) exec "$RUN" --list-profiles "$@" ;;
+    run)      wants_help "$@" && verb_help run
+              exec "$RUN" "$@" ;;
+    mint)     wants_help "$@" && verb_help mint
+              exec "$RUN" --mint-only "$@" ;;
+    profiles) wants_help "$@" && verb_help profiles
+              # --names is the machine-readable view: one record per profile,
+              # emitted by the tool that owns the profile format so nothing else
+              # ever has to parse profiles.conf.
+              if [[ "${1:-}" == "--names" ]]; then shift; exec "$RUN" --profile-names "$@"; fi
+              exec "$RUN" --list-profiles "$@" ;;
 
     # 'list' and 'burn' each address two different populations: every token on
     # the account, and just the cfsr-* residue of runs whose burn failed. The
     # --stale flag picks the second; without it you get the account-wide view.
     list)
+      wants_help "$@" && verb_help list
       if [[ "${1:-}" == "--stale" ]]; then shift; exec "$RUN" --list-stale "$@"
       else exec "$MINT" --list "$@"; fi ;;
     burn)
+      wants_help "$@" && verb_help burn
       if [[ "${1:-}" == "--stale" ]]; then shift; exec "$RUN" --burn-stale "$@"
       elif [[ $# -gt 0 && "$1" != -* ]]; then local id="$1"; shift; exec "$MINT" --revoke "$id" "$@"
       else die "burn needs something to burn — pass a token id (cf-minter list shows them), or --stale to sweep runs whose burn failed."; fi ;;
@@ -108,6 +122,112 @@ main(){
     --*)      die "cf-minter takes a command first, not a flag. Try: cf-minter run ${verb}${*:+ $*}  (cf-minter help lists the commands)" ;;
     *)        die "unknown command '$verb'. Commands: run, mint, profiles, list, burn, doctor. Run 'cf-minter help' for what each does." ;;
   esac
+}
+
+# Per-verb help. It lives here because this is the surface a person meets: the
+# verbs are this dispatcher's own vocabulary, and the tools underneath answer
+# --help in their own — a header written for whoever reads the script directly.
+# Pointing an operator at that was the bug. Nothing below knows anything about
+# minting; it is text about the verbs this file already defines.
+verb_help(){
+  case "$1" in
+    run) cat <<'H'
+cf-minter run — mint a scoped token, run your command with it, burn it after.
+
+USAGE
+  cf-minter run --profile <name> [--zone <zone>] [options] -- <command…>
+
+  The command goes after '--'. It receives the minted value in the environment
+  as CLOUDFLARE_API_TOKEN and CF_SCOPED_TOKEN — never in its arguments.
+
+OPTIONS
+  --profile <name>   which named purpose to mint. 'cf-minter profiles' lists
+                     them and the reach each grants.
+  --zone <zone>      the zone a zone-scoped profile applies to, by name.
+  --zone-id <id>     the same, by id, when you already hold it.
+  --ttl <duration>   how long the token may live: 30s, 15m, 2h, 1d. The
+                     profile's own ttl is the default. Cloudflare refuses the
+                     token past that moment even if the burn never happens.
+  --slug <text>      a label folded into the token's name, to tell runs apart.
+  --minter-cmd <cmd> a command that prints your minter credential, instead of
+                     CF_MINTER_TOKEN in the environment.
+  --dry-run          show the whole plan — permissions, zone, expiry, and the
+                     exact request — without minting anything or running the
+                     command.
+
+THE BURN
+  The token is deleted at Cloudflare on the way out however the run ended:
+  success, failure, or Ctrl-C. Your command's exit code is preserved, with one
+  exception — if the command succeeded but the burn failed, the run exits 1 and
+  names the token. A green job that left a live credential behind is not green.
+
+  'cf-minter list --stale' finds any such leftovers; 'cf-minter burn --stale'
+  revokes them.
+H
+    ;;
+    mint) cat <<'H'
+cf-minter mint — mint a token and print it once, for work you drive by hand.
+
+USAGE
+  cf-minter mint --profile <name> [--zone <zone>] [--ttl <duration>]
+
+  Takes the same options as 'cf-minter run' (see 'cf-minter run --help'), minus
+  a command to wrap.
+
+THE DIFFERENCE THAT MATTERS
+  'run' burns the token when your command ends. 'mint' cannot — nothing marks
+  the end of hand-driven work, so the value is printed once and the TTL is the
+  only thing that retires it. Prefer 'run' wherever a command can be named, and
+  keep the ttl short here.
+
+  The printed value is not stored anywhere. 'cf-minter list' shows the token,
+  and 'cf-minter burn <id>' revokes it early.
+H
+    ;;
+    profiles) cat <<'H'
+cf-minter profiles — the named purposes you can mint, and the reach each grants.
+
+USAGE
+  cf-minter profiles          what each profile changes, reads, and is for
+  cf-minter profiles --names  one tab-separated record per profile, for scripts
+                              and shell completion: name, scope, ttl, purpose
+
+A profile is a blast radius with a name. 'zone' profiles require a --zone and
+refuse to run without one; 'account' profiles refuse to be given one.
+
+Profiles live in profiles.conf, which is their only home — adding one is a
+single edit to that file and no code change anywhere.
+H
+    ;;
+    list) cat <<'H'
+cf-minter list — what tokens exist on the account.
+
+USAGE
+  cf-minter list           every API token the account holds
+  cf-minter list --stale   only the leftovers: tokens this tool minted whose
+                           burn failed, still listed past the lifetime their own
+                           name declares
+
+--stale exits 0 when there are none and 1 when it listed any, so it reads
+correctly as a check in a script. Every token minted here is named
+cfsr-<when>-t<ttl>-<slug>; nothing outside that convention is ever considered
+this tool's to touch.
+H
+    ;;
+    burn) cat <<'H'
+cf-minter burn — revoke a token now.
+
+USAGE
+  cf-minter burn <token-id>   revoke exactly that token ('cf-minter list' shows ids)
+  cf-minter burn --stale      revoke the leftovers from runs whose burn failed
+
+--stale only ever touches tokens this tool minted (named cfsr-*) and only past
+the lifetime their own name declares. A token you created any other way is
+never in scope, whatever it is called.
+H
+    ;;
+  esac
+  exit 0
 }
 
 # doctor is the only verb with content of its own, and it is deliberately thin:

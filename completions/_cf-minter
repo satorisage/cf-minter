@@ -1,0 +1,72 @@
+#compdef cf-minter
+#
+# zsh completion for cf-minter.
+#
+#   fpath=(/path/to/cf-minter/completions $fpath); autoload -Uz compinit; compinit
+#
+# The profile names come from `cf-minter profiles --names`, not from reading
+# profiles.conf: that file is the one home of the profile set, and a second
+# reader of its format would make adding a profile two edits instead of one.
+# The purpose text rides along as each candidate's description, so the reach a
+# profile grants is visible at the moment it is chosen. Nothing here touches the
+# network — token ids are deliberately not completed.
+
+_cf_minter_profiles(){
+  local -a rows; local line name scope ttl why
+  cf-minter profiles --names 2>/dev/null | while IFS=$'\t' read -r name scope ttl why; do
+    rows+=("${name}:${scope} · ${ttl} · ${why}")
+  done
+  _describe -t profiles 'profile' rows
+}
+
+_cf-minter(){
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  # Everything after '--' is the wrapped command, which owns its own completion.
+  local i
+  for (( i=1; i < CURRENT; i++ )); do
+    if [[ "${words[i]}" == "--" ]]; then
+      shift $i words; (( CURRENT -= i )); _normal; return
+    fi
+  done
+
+  local -a scope_opts
+  scope_opts=(
+    '--profile[named purpose to mint]:profile:_cf_minter_profiles'
+    '--zone[zone a zone-scoped profile applies to]:zone name:'
+    '--zone-id[the same zone, by id]:zone id:'
+    '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)'
+    '--slug[label folded into the token name]:slug:'
+    '--minter-cmd[command that prints your minter credential]:command:_cmdstring'
+    '--minter-token-file[file holding your minter credential]:file:_files'
+    '--dry-run[show the plan; mint nothing, run nothing]'
+    '--help[help for this command]'
+  )
+
+  if (( CURRENT == 2 )); then
+    local -a verbs
+    verbs=(
+      'run:mint a token, run a command with it, burn it after'
+      'mint:mint a token and print it once, for hand-driven work'
+      'profiles:the named purposes you can mint, and the reach each grants'
+      'list:what tokens exist on the account'
+      'burn:revoke a token now'
+      'doctor:check curl, jq, and whether your minter qualifies'
+      'help:what each command does'
+    )
+    _describe -t commands 'cf-minter command' verbs
+    return
+  fi
+
+  case "${words[2]}" in
+    run)      _arguments $scope_opts '*::command:_normal' ;;
+    mint)     _arguments $scope_opts ;;
+    profiles) _arguments '--names[one tab-separated record per profile, for scripts]' '--help[help for this command]' ;;
+    list)     _arguments '--stale[only leftovers from runs whose burn failed]' '--help[help for this command]' ;;
+    burn)     _arguments '--stale[sweep leftovers from runs whose burn failed]' '--help[help for this command]' ;;
+    doctor)   _arguments '--help[help for this command]' ;;
+  esac
+}
+
+_cf-minter "$@"

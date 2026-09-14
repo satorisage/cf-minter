@@ -127,8 +127,12 @@ echo "the dispatcher never touches a credential:"
 # code that handles a credential from help text that explains one — the help
 # necessarily names CLOUDFLARE_API_TOKEN, because telling the operator what
 # their command will receive is its job. Strip comments and the usage heredoc,
-# then look at what is left: that is the code.
-CODE="$(sed -e '/cat <<USAGE/,/^USAGE$/d' -e 's/[[:space:]]*#.*$//' "$REAL")"
+# then look at what is left: that is the code. Both help heredocs are stripped:
+# the top-level usage, and the per-verb help blocks — a verb's help explains the
+# environment the wrapped command receives, so naming those variables is the
+# text doing its job. The guard's own self-check below proves this stripping did
+# not blind it: a planted violation in real code is still caught.
+CODE="$(sed -e '/cat <<USAGE/,/^USAGE$/d' -e "/cat <<'H'/,/^H$/d" -e 's/[[:space:]]*#.*$//' "$REAL")"
 
 grep -qE 'CF_SCOPED_TOKEN|CLOUDFLARE_API_TOKEN|--value-file|--minter-token-file' <<<"$CODE" \
   && bad "cf-minter's code touches a token value or value file — it must only route" \
@@ -172,6 +176,92 @@ if [[ "$(cat "$BOX/called-tool" 2>/dev/null)" == "cf-scoped-run.sh" ]]; then
   ok "…through a chain of symlinks, not just one"
 else bad "a symlink-to-a-symlink did not resolve"; fi
 rm -rf "$LINKDIR"
+
+echo
+echo "per-verb help is written for a person, not lifted from the source:"
+# The front door advertises 'cf-minter <command> --help'. It used to reach the
+# underlying tool, which answers with its own commented script header — sibling
+# script names, test-only env vars, and a format written for whoever opens the
+# file. What must be true is that no verb's help is a comment block, and that
+# every verb's help actually names that verb.
+for v in run mint profiles list burn doctor; do
+  out="$("$BOX/cf-minter" "$v" --help 2>&1)"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then bad "$v --help exited $rc, wanted 0"; continue; fi
+  if printf '%s' "$out" | grep -q '^#'; then
+    bad "$v --help emits commented source lines"
+  elif ! printf '%s' "$out" | head -1 | grep -q "cf-minter $v"; then
+    bad "$v --help does not open by naming 'cf-minter $v'"
+  else ok "$v --help is prose about '$v', with no source comments"; fi
+done
+
+# A --help meant for the WRAPPED command must reach the wrapped command. Only a
+# leading -h/--help is the verb's own; anything later belongs to the caller's
+# program, and swallowing it would break commands this tool exists to run.
+rm -f "$BOX/called-args"
+"$BOX/cf-minter" run --profile dns-edit -- mycmd --help >/dev/null 2>&1
+if grep -q -- '-- mycmd --help' "$BOX/called-args" 2>/dev/null; then
+  ok "a --help after '--' is passed through, not intercepted"
+else bad "a wrapped command's --help was swallowed by the dispatcher"; fi
+
+echo
+echo "the machine-readable profile emit that shell completion consumes:"
+# Completion must never parse profiles.conf itself — that file is the one home
+# of the profile set, and a second reader of its format makes adding a profile
+# two edits. So the dispatcher routes 'profiles --names' to the tool that owns
+# the format, and that route is the contract the completion files depend on.
+rm -f "$BOX/called-tool" "$BOX/called-args"
+"$BOX/cf-minter" profiles --names >/dev/null 2>&1
+if [[ "$(cat "$BOX/called-tool" 2>/dev/null)" == "cf-scoped-run.sh" \
+   && "$(cat "$BOX/called-args" 2>/dev/null)" == "--profile-names" ]]; then
+  ok "profiles --names reaches cf-scoped-run.sh --profile-names"
+else bad "profiles --names routed to '$(cat "$BOX/called-tool" 2>/dev/null)' with '$(cat "$BOX/called-args" 2>/dev/null)'"; fi
+
+rm -f "$BOX/called-args"
+"$BOX/cf-minter" profiles >/dev/null 2>&1
+if [[ "$(cat "$BOX/called-args" 2>/dev/null)" == "--list-profiles" ]]; then
+  ok "bare profiles still reaches --list-profiles (the human view)"
+else bad "bare profiles no longer routes to --list-profiles"; fi
+
+echo
+echo "the completion files themselves:"
+COMPDIR="$HERE/../completions"
+for f in cf-minter.bash _cf-minter; do
+  if [[ -r "$COMPDIR/$f" ]]; then ok "completions/$f exists"; else bad "completions/$f is missing"; fi
+done
+if bash -n "$COMPDIR/cf-minter.bash" 2>/dev/null; then
+  ok "completions/cf-minter.bash parses as bash"
+else bad "completions/cf-minter.bash has a syntax error"; fi
+if command -v zsh >/dev/null 2>&1; then
+  if zsh -n "$COMPDIR/_cf-minter" 2>/dev/null; then
+    ok "completions/_cf-minter parses as zsh"
+  else bad "completions/_cf-minter has a syntax error"; fi
+else
+  ok "zsh absent — _cf-minter syntax check skipped (not a failure)"
+fi
+# Neither completion may read profiles.conf directly: that is the whole point of
+# the emit above, and a grep is the only check that stays true as they change.
+for f in cf-minter.bash _cf-minter; do
+  if grep -q 'profiles\.conf' "$COMPDIR/$f"; then
+    if grep -q 'one home of the profile set' "$COMPDIR/$f" && ! grep -qE '(cat|sed|awk|grep|<)[^|]*profiles\.conf' "$COMPDIR/$f"; then
+      ok "completions/$f mentions profiles.conf only in prose, never reads it"
+    else bad "completions/$f reads profiles.conf directly"; fi
+  else ok "completions/$f does not touch profiles.conf"; fi
+done
+# The bash completion, driven the way the shell drives it.
+if out="$(PATH="$BOX:$PATH" bash -c '
+    source "'"$COMPDIR"'/cf-minter.bash"
+    COMP_WORDS=(cf-minter ""); COMP_CWORD=1; _cf_minter; printf "%s" "${COMPREPLY[*]}"' 2>/dev/null)"; then
+  if [[ "$out" == *run* && "$out" == *doctor* ]]; then
+    ok "bash completion offers the verbs at the first word"
+  else bad "bash completion offered '$out' for the first word"; fi
+else bad "bash completion errored when driven"; fi
+# After '--' the wrapped command owns completion; returning 1 is how bash is
+# told to fall back to its own default rather than offering cf-minter's flags.
+if PATH="$BOX:$PATH" bash -c '
+    source "'"$COMPDIR"'/cf-minter.bash"
+    COMP_WORDS=(cf-minter run --profile dns-edit -- mycmd ""); COMP_CWORD=6; _cf_minter' 2>/dev/null; then
+  bad "bash completion claimed the words after '--'"
+else ok "bash completion defers to the wrapped command after '--'"; fi
 
 echo
 printf 'cf-minter dispatcher tests: %d passed, %d failed\n' "$PASS" "$FAIL"

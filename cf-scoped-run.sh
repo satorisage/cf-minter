@@ -187,6 +187,7 @@ while [[ $# -gt 0 ]]; do
     --minter-token-file) need_arg "$1" "${2:-}"; MINT_ARGS+=(--minter-token-file "$2"); shift 2 ;;
     --minter-token) die "--minter-token is refused on purpose: argv is world-readable in \`ps\`, so a token passed there leaks to every process on the host. Supply it as CF_MINTER_TOKEN in the environment, as --minter-token-file <path> (mode 0600), or as --minter-cmd '<command that prints it>'." ;;
     --list-profiles) MODE="list-profiles"; shift ;;
+    --profile-names) MODE="profile-names"; shift ;;
     --list-stale) MODE="list-stale"; shift ;;
     --burn-stale) MODE="burn-stale"; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
@@ -211,17 +212,64 @@ profiles_file_or_die(){
 # profile_names: every `profile:` name in the file, in file order.
 profile_names(){ sed -n 's/^profile:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$PROFILES_FILE"; }
 
+# perms_at <level>: the profile's permission names granted at that level, bare.
+# A permission is "<Name>:<Level>"; the display groups by level because the
+# level is what decides how far a mistake reaches, and an optional @account /
+# @zone disambiguation hint is not part of the name a reader is scanning for.
+perms_at(){
+  local want="$1" p name lvl out=""
+  for p in "${PROFILE_PERMS[@]}"; do
+    name="${p%:*}"; lvl="${p##*:}"; lvl="${lvl%%@*}"
+    [[ "$lvl" == "$want" ]] || continue
+    out="${out:+$out, }$name"
+  done
+  printf '%s' "$out"
+}
+
+# list_profiles: the human view. A profile IS a blast radius, so the reach comes
+# first and is split by level — what the credential can CHANGE is the line that
+# has to be read, and burying it in a flat permission string makes the reader
+# reconstruct it at exactly the moment they are choosing. Names sort so the set
+# is scannable; the purpose text stays verbatim from the file.
 list_profiles(){
   profiles_file_or_die
   hdr "profiles ($PROFILES_FILE)"
-  local n
-  for n in $(profile_names); do
+  local n edits reads
+  for n in $(profile_names | LC_ALL=C sort); do
     load_profile "$n"
-    printf '  %s%s%s  [%s, ttl %s]\n' "$G" "$n" "$Z" "$PROFILE_SCOPE" "$PROFILE_TTL"
-    printf '        perms: %s\n' "${PROFILE_PERMS[*]}"
-    [[ -n "$PROFILE_WHY" ]] && printf '        %s\n' "$PROFILE_WHY"
+    printf '  %s%s%s  %s · %s\n' "$G" "$n" "$Z" "$PROFILE_SCOPE" "$PROFILE_TTL"
+    edits="$(perms_at Edit)"; reads="$(perms_at Read)"
+    [[ -n "$edits" ]] && printf '    changes  %s\n' "$edits"
+    [[ -n "$reads" ]] && printf '    reads    %s\n' "$reads"
+    [[ -n "$PROFILE_WHY" ]] && printf '    for      %s\n' "$PROFILE_WHY"
   done
   info "add one by editing $PROFILES_FILE — no code change is needed"
+}
+
+# emit_profile_names: the same set, one tab-separated record per profile, for a
+# program rather than a person — shell completion is the caller. It exists so
+# completion never has to parse profiles.conf itself: that file is the one home
+# of the profile set, and a second reader of its format would make adding a
+# profile two edits the day the format moves. No colour, no header, no blank
+# lines; safe to read when stdout is not a terminal, which it never is here.
+emit_profile_names(){
+  profiles_file_or_die
+  local n
+  for n in $(profile_names | LC_ALL=C sort); do
+    load_profile "$n"
+    printf '%s\t%s\t%s\t%s\n' "$n" "$PROFILE_SCOPE" "$PROFILE_TTL" "$PROFILE_WHY"
+  done
+}
+
+# nearest_profile <typo>: the one known name that contains the typo or is
+# contained by it — enough to catch a truncation or a stray character without
+# an edit-distance routine, and silent when nothing is close rather than
+# guessing. Only ever decorates a refusal; the refusal still refuses.
+nearest_profile(){
+  local want="$1" n
+  for n in $(profile_names); do
+    [[ "$n" == *"$want"* || "$want" == *"$n"* ]] && { printf '%s' "$n"; return; }
+  done
 }
 
 # load_profile <name>: fill PROFILE_* from the file, refusing by name on anything
@@ -259,7 +307,8 @@ load_profile(){
   done < "$PROFILES_FILE"
 
   if [[ "$seen" -eq 0 ]]; then
-    die "unknown profile '$want'. Known profiles: $(profile_names | tr '\n' ' ')— see $PROFILES_FILE, where adding one is a single edit."
+    local near; near="$(nearest_profile "$want")"
+    die "unknown profile '$want'.${near:+ Did you mean '$near'?} Known profiles: $(profile_names | tr '\n' ' ')— see $PROFILES_FILE, where adding one is a single edit."
   fi
   [[ ${#PROFILE_PERMS[@]} -gt 0 ]] \
     || die "profile '$want' declares no perm: line ($PROFILES_FILE) — a profile with no permissions would mint a blank credential"
@@ -489,6 +538,7 @@ run_scoped(){
 case "$MODE" in
   run)           run_scoped ;;
   list-profiles) list_profiles ;;
+  profile-names) emit_profile_names ;;
   list-stale)    list_stale ;;
   burn-stale)    burn_stale ;;
 esac
