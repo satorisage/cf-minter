@@ -32,11 +32,27 @@ jobs:
         if: runner.os == 'macOS'
         run: brew list jq >/dev/null 2>&1 || brew install jq
 
+      # zsh is the login shell on the macOS runners but is NOT in the Ubuntu
+      # runner image — it appears nowhere in that image's manifest. The zsh
+      # completion suite drives a real interactive zsh through a pseudo-terminal,
+      # so without this the completion would be exercised on one platform only,
+      # which is the arrangement that let a GNU/BSD split reach main before.
+      - name: Install zsh (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
       - name: Versions under test
         run: |
           bash --version | head -1
           curl --version | head -1
           jq --version
+          zsh --version
 
+      # The completion suite skips when zsh or zsh/zpty is unavailable, which is
+      # right on a contributor's machine and wrong here: a skip in CI is a
+      # failure mode that reads as green. Both runners are prepared above, so CI
+      # demands the suite actually ran.
       - name: Run the hermetic suite
+        env:
+          CF_REQUIRE_ZSH: 1
         run: bash test/run-all.sh

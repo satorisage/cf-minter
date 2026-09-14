@@ -28,15 +28,24 @@ bad(){ FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$1" >&2; }
 echo "zsh completion (driven through a pty, with a real TAB):"
 
 # A skip is stated, never silent: a suite that quietly drops a check reads as
-# green for a reason nobody can see.
-if ! command -v zsh >/dev/null 2>&1; then
-  echo "  skip  zsh is not installed here — completion behaviour unverified on this host"
+# green for a reason nobody can see. And where the environment was prepared on
+# purpose — CI installs zsh on both runners — a skip is not a tolerable outcome
+# at all, because the only thing it can mean is that the preparation broke.
+# CF_REQUIRE_ZSH turns the skip into the failure it is there.
+require_zsh="${CF_REQUIRE_ZSH:-0}"
+unavailable(){
+  if [[ "$require_zsh" != "0" ]]; then
+    bad "$1 — CF_REQUIRE_ZSH is set, so this is a failure, not a skip"
+    printf '\nzsh completion tests: %d passed, %d failed\n' "$PASS" "$FAIL"
+    exit 1
+  fi
+  echo "  skip  $1"
   exit 0
-fi
-if ! zsh -fc 'zmodload zsh/zpty' 2>/dev/null; then
-  echo "  skip  zsh/zpty unavailable — completion behaviour unverified on this host"
-  exit 0
-fi
+}
+command -v zsh >/dev/null 2>&1 \
+  || unavailable "zsh is not installed here — completion behaviour unverified on this host"
+zsh -fc 'zmodload zsh/zpty' 2>/dev/null \
+  || unavailable "zsh/zpty unavailable — completion behaviour unverified on this host"
 
 BOX="$(mktemp -d)"; trap 'rm -rf "$BOX"' EXIT
 # A throwaway ZDOTDIR: the operator's own zshrc must not decide whether this

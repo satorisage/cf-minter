@@ -147,3 +147,28 @@ saying plainly that parsing is not evidence of completing.
 joined setup and use with `&&` on one line, so `compinit` had not run when TAB
 was pressed — the instruction could not have worked as written. A throwaway
 `ZDOTDIR` shell is the correct shape and is what the test now uses.
+
+## CI — 2026-09-14: the completion suite now runs on both platforms
+
+zsh is the login shell on the macOS runners and is **not** in the Ubuntu runner
+image — verified at source against the runner-images manifests for Ubuntu 24.04
+and 26.04, where it appears nowhere. So the pty-driven completion suite was
+being exercised on one platform only. That is the same arrangement that let a
+GNU/BSD `stat` split reach main before this project ran on two legs.
+
+Two changes:
+
+1. **`apt-get install -y zsh` on the Linux leg**, and `zsh --version` added to
+   the versions step so the installed shell is visible in the log.
+2. **`CF_REQUIRE_ZSH=1` in the suite's environment.** The completion suite skips
+   when zsh or `zsh/zpty` is missing, which is correct on a contributor's
+   machine and wrong in CI: both runners are prepared on purpose, so the only
+   thing a skip there can mean is that the preparation broke — and a skip reads
+   as green. With the flag set the skip becomes a failure.
+
+Verified in a real `ubuntu:24.04` container rather than asserted:
+
+- with zsh 5.9 installed — **217 assertions, 0 failed, ALL SUITES PASSED**,
+  including all 9 pty-driven completion assertions on bash 5.2.21.
+- with zsh deliberately absent and `CF_REQUIRE_ZSH=1` — the suite **fails**,
+  exit 1, naming the missing shell. A broken install step cannot pass silently.
