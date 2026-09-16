@@ -169,10 +169,11 @@ none — no questions awaiting input.
 ## 5. Next session
 
 Nothing is owed. `main` is green on both CI legs and in sync with origin; no
-milestone is active. Two dotagent-side items were raised 2026-09-16 and are the
-owner's, not this project's: `mental-models` is past its polish cadence, and the
-sweep reported `copy-truth` as a stale selected pairing when PROJECT-SCOPE.md
-records it as considered and **not** selected.
+milestone is active. The one open item raised by the 2026-09-16 sweep is
+dotagent's, not this project's: the `mental-models` polish, queued there as
+`L194`. The `copy-truth` finding from the same sweep was a defect in the check
+and is withdrawn, fixed at dotagent `d8abe92` along with three instrument
+failures the sweep hit on itself.
 
 ---
 
