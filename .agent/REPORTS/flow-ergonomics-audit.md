@@ -172,3 +172,33 @@ Verified in a real `ubuntu:24.04` container rather than asserted:
   including all 9 pty-driven completion assertions on bash 5.2.21.
 - with zsh deliberately absent and `CF_REQUIRE_ZSH=1` — the suite **fails**,
   exit 1, naming the missing shell. A broken install step cannot pass silently.
+
+## CI failure and fix — 2026-09-16
+
+Run 34853468319 failed on `ubuntu-latest`: the completion suite reported
+`compinit: initialization aborted`, 0 passed / 9 failed. The Linux leg had never
+run this suite before, so the CI change is what surfaced it — the guard worked.
+
+**The container check that preceded it was not faithful.** It ran as root in a
+clean image, and the two things that actually matter on a runner were absent: a
+group-writable directory on `fpath`, and Debian's system zshrc. Reproduced
+exactly once both were present.
+
+**Cause.** Debian and Ubuntu ship an `/etc/zsh/zshrc` that runs a bare
+`compinit` of its own (line 112 of the packaged file). That runs *before* any
+`ZDOTDIR/.zshrc`. On a host with a world-writable directory on `fpath` — which
+a CI runner has — that call finds an insecure directory, has no one to ask
+about it, and aborts, taking the completion system down before the completion
+under test is ever loaded. The suite's own `compinit -u` never got the chance
+to matter.
+
+**Fix.** A `.zshenv` in the throwaway `ZDOTDIR` setting `skip_global_compinit=1`
+— Debian's own documented escape hatch, named in a comment directly above the
+call it disables — because `.zshenv` is read before the system zshrc and is the
+only place the setting lands in time. The suite's own `compinit` also gained
+`-i` alongside `-u`: a runner legitimately has world-writable fpath entries, and
+this suite is not the place to adjudicate that.
+
+**Verified in the environment that reproduced the failure** — non-root user,
+`chmod 777` on a directory on `fpath`, Debian's zshrc present: 217 assertions,
+0 failed, ALL SUITES PASSED.

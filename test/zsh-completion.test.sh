@@ -48,13 +48,30 @@ zsh -fc 'zmodload zsh/zpty' 2>/dev/null \
   || unavailable "zsh/zpty unavailable — completion behaviour unverified on this host"
 
 BOX="$(mktemp -d)"; trap 'rm -rf "$BOX"' EXIT
+
 # A throwaway ZDOTDIR: the operator's own zshrc must not decide whether this
 # passes, and compinit needs its dump somewhere writable and fresh.
+#
+# .zshenv is read BEFORE the system-wide /etc/zsh/zshrc, which is the only place
+# this setting can be made in time. Debian and Ubuntu ship a zshrc that runs a
+# bare `compinit` of its own, and on a machine with a group-writable directory
+# on fpath — which is what a CI runner has — that call finds an insecure
+# directory, cannot ask a question it has no one to ask, and aborts. It takes
+# the completion system down with it before the completion under test is ever
+# loaded. The variable is Debian's own documented escape hatch, named in a
+# comment directly above the call it disables.
+cat > "$BOX/.zshenv" <<'ZENV'
+skip_global_compinit=1
+ZENV
+
+# -u and -i: use insecure directories and do not ask about them. A CI runner
+# legitimately has world-writable directories on fpath, and this suite is not
+# the place to adjudicate that — it is here to complete a command line.
 cat > "$BOX/.zshrc" <<ZRC
 fpath=($REPO/completions \$fpath)
 path=($REPO \$path)
 autoload -Uz compinit
-compinit -u -d "$BOX/zcompdump"
+compinit -u -i -d "$BOX/zcompdump"
 PS1='RDY%# '
 ZRC
 
