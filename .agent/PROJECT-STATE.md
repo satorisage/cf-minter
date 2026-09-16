@@ -1,6 +1,6 @@
 # Project State
 
-**Last updated:** 2026-09-11
+**Last updated:** 2026-09-16
 **Active focus:** **v0.1.0 is released.** https://github.com/satorisage/cf-minter
 is public, MIT-licensed, CI green on Linux and macOS. M1, M2 and M3 are all
 complete, and the project's founding success test — a stranger goes from clone
@@ -9,7 +9,8 @@ passes.
 
 No milestone is active. There is no committed next milestone; the tool does what
 it was built to do and is obtainable by anyone. Candidate work, none of it
-urgent, is in §7.
+urgent, is in §7. An unmilestoned ergonomics pass landed 2026-09-13/16 — see
+Current below.
 
 <!-- History cap (D-0072): keep at most the current head + ~1 most-recent
      `**Prior YYYY-MM-DD —**` entry inline here. When you add a newer Prior
@@ -21,7 +22,62 @@ urgent, is in §7.
 
 ---
 
-## Current — 2026-09-11
+## Current — 2026-09-16
+
+**An ergonomics pass, inside the ratified position rather than against it.** The
+owner asked for "wow factor," then sharpened it mid-walkthrough to flow —
+completion and low friction, not visual polish. That is what `## Out of scope`
+already defines ergonomics to mean, so the exclusion held and **no scope
+amendment was made**. Four findings, all shipped:
+
+- **Per-verb help.** `cf-minter run --help` had been emitting 105 lines, 104 of
+  them the underlying script's commented header — sibling script names and
+  test-only environment included. The front page advertises that exact command.
+  Each verb now answers in the tool's own voice.
+- **Shell completion, zsh and bash.** Fed by a new `--profile-names` emit from
+  the tool that owns the profile format, so completion never becomes a second
+  parser of `profiles.conf` and adding a profile stays one edit.
+- **`profiles` leads with reach**, split into what a profile changes and what it
+  only reads. Choosing a profile is choosing a blast radius.
+- **A near-miss profile name is answered** with the nearest real one; the
+  refusal still refuses.
+
+**The completion shipped broken, and the tests could not see it.** They asserted
+that the file parses and that `compinit` registers it. Both were true the whole
+time, and both were derived from the same assumption the completion itself was
+making — so they could only confirm the two agreed about what to ignore. TAB
+produced a directory listing: `_arguments` reads the line from `words[1]`, so it
+treated the dispatcher as the command and every verb as an unexpected argument.
+Two more defects sat behind it — candidates collected in a pipeline, so the
+subshell discarded them; specs passed as an expanded array rather than literal
+arguments.
+
+The replacement drives a real interactive zsh through a pseudo-terminal, presses
+an actual TAB, and asserts the candidates — including that no filename appears
+among them, this failure's signature. Verified to bite: reintroducing the bug
+turns 9 passes into 7 failures.
+
+**Then CI went red, which is the system working.** The completion suite had been
+running on macOS only, because zsh is absent from the Ubuntu runner image
+(checked against the manifests, not recalled). Adding it to the Linux leg
+immediately surfaced a second failure: Debian's `/etc/zsh/zshrc` runs a bare
+`compinit` before any `ZDOTDIR/.zshrc`, and on a host with a world-writable
+directory on `fpath` — which a CI runner has — it aborts, taking the completion
+system down before the completion under test loads. Fixed via Debian's own
+documented `skip_global_compinit`. **CI green on both legs, with the completion
+suite observed running on each** (run 35145910123).
+
+The container check that preceded the red push ran as root in a clean image and
+had neither a group-writable `fpath` entry nor Debian's zshrc, so it could not
+have caught it. A check that does not reproduce the environment it claims to
+cover is not evidence — the same lesson the test failure taught, one layer out.
+
+**217 assertions, up from 183.** Untouched throughout: the burn trap, the
+secret's path, what any profile grants, and the `curl` + `jq` runtime.
+
+---
+
+## Prior — 2026-09-11
 
 **M3 shipped: the tool became obtainable.** MIT licence; GitHub Actions running
 the hermetic suite on `ubuntu-latest` and `macos-latest` (no secrets needed —
@@ -60,83 +116,9 @@ and the repo ships its own tracking.
 
 ---
 
-## Prior — 2026-09-10
+<!-- Older entries (2026-09-10 and earlier) rotated to `.agent/PROJECT-STATE-HISTORY.md`
+     by the history cap, D-0072. Not read at session start. -->
 
-**M1 shipped.** `cf-minter` is now a single verb-first entry point —
-`run` / `mint` / `profiles` / `list` / `burn` / `doctor` — over the two tools,
-which are unchanged and still usable directly. Definition of done, each
-demonstrated rather than reported:
-
-| DoD item | evidence |
-|---|---|
-| `extract-standalone-runner` landed | `main` contains `3e44147`; branch deleted |
-| bare `cf-minter` explains itself | prints a COMMANDS block; asserted in suite |
-| six verbs exist and route | `test/cf-minter.test.sh`, 21 assertions |
-| every refusal names the fix | 62 refusals audited; 5 terse ones given remedies (`8ed2b77`) |
-| suite green incl. SIGINT burn | 180 assertions, `ALL SUITES PASSED` |
-| README rewritten | `8896df2`; every command in it was executed first |
-
-**Two defects found and fixed while building it,** both in the cold-operator
-path the scope's under-a-minute test depends on:
-
-1. `--dry-run` required a minter credential — so the very first command the
-   README tells a newcomer to run printed a plan with its permissions silently
-   missing (measured: 0 of 2 `would resolve permission` lines without a minter,
-   2 with). The mint tool refused before resolving them and exited; the wrapper
-   carried on and reported "dry run complete". Fixed in `d10a66b` by scoping the
-   precondition to the real path — the same shape the `curl` check four lines
-   below already had. The live mint and live revoke still refuse by name, now
-   asserted.
-2. `cf()` defaulted its bearer to `$CF_MINTER_TOKEN`, which aborts under
-   `set -u` when no minter is set. Only reachable once (1) was fixed; caught by
-   the new test, not by hand.
-
-**Architecture note:** the dispatcher holds no logic — no token value, no
-network call — and two guards in its suite assert it stays that way, each
-paired with a vacuity check so a detector that stops detecting fails loudly
-instead of reporting clean.
-
-**Open, not blocking:**
-- `mental-models` pairing is 106d past its quarterly polish cadence (its content
-  is sound; the cadence is the finding). Polish belongs in the dotagent repo.
-- Two dotagent engine findings were handed off, not fixed here:
-  `pairing-polish-cadence` counts documented non-selections as selections, and
-  the retro digest crashes on a project with no `ROADMAP.md` (which the
-  operating manual permits). Both were reported upstream and subsequently fixed there; the
-  handoff brief was ephemeral and is not kept here.
-- ~~The bootstrap's generated interview packs are committed and stale.~~
-  **Resolved 2026-09-11.** The governing rule predates the whole exchange:
-  **D-0017 part 3, Binding since 2026-05-27** — prompt-packs are ephemeral,
-  reproducible from their engines, and "do not get archived", because `REPORTS/`
-  is the findings inbox and a generated input sitting there is permanent fake
-  open work. Verified at source. `bootstrap-project.sh` was the outlier for
-  three and a half months, because the rule was enforced by memory alone; the
-  dotagent seat has now made the violation unrepresentable (packs write to
-  `$XDG_CACHE_HOME/dotagent/bootstrap/<project>/`). So the 228KB removed here
-  was a standing violation, not an open question. They regenerate on demand:
-  `propose.sh` now emits 89 pairings against the **86** frozen in the deleted
-  copy, which is the staleness the finding was about.
-
-### Bootstrap provenance
-
-Recorded in `.agent/.bootstrap-stamp` (the canonical home, per the engine's
-D-0017 fix). This project predates that mechanism, so the stamp was
-reconstructed rather than emitted — every field measured, none assumed:
-
-- `dotagent: 968eb42` — recovered from `~/.dotagent`'s `release` reflog, which
-  shows that commit as HEAD from 2026-09-07 14:59 to 2026-09-09 18:29; the
-  bootstrap ran 14:24-14:54 on 09-09, inside that window. Confirmed by
-  comparing `968eb42`'s `pairings/` tree against the pairing list in the
-  now-deleted pack (recoverable at `a26eedd`): identical, 86 for 86.
-- `pairings-available: 86` — not 87 as first supposed. `pull-based-deployment`
-  reached dev on 09-08 but had not been promoted to `release`, and the
-  bootstrap reads the release checkout.
-- `pairings-list-sha: 9e43c9f76c67` — computed by the stamp writer's own
-  method, validated by reproducing today's `5fd2e6dc6613` with the same steps.
-
-**No committed next milestone.** The tool is finished for its stated purpose
-and is publicly obtainable. Candidates, all optional, are listed in §7.
----
 
 ## 1. Authority surface — where to look for X
 
@@ -186,7 +168,11 @@ none — no questions awaiting input.
 
 ## 5. Next session
 
-What to do first when next session starts. 1-3 lines. Can be empty.
+Nothing is owed. `main` is green on both CI legs and in sync with origin; no
+milestone is active. Two dotagent-side items were raised 2026-09-16 and are the
+owner's, not this project's: `mental-models` is past its polish cadence, and the
+sweep reported `copy-truth` as a stale selected pairing when PROJECT-SCOPE.md
+records it as considered and **not** selected.
 
 ---
 
