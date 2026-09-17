@@ -141,7 +141,8 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
 (not an upsert) — use --list to avoid duplicates before minting.
 
   --name <token-name>     name for the new token (required to mint).
-  --perm <Name:Level>     permission to grant, repeatable. Level is Edit or Read.
+  --perm <Name:Level>     permission to grant, repeatable. Level is Edit, Read, or
+                          Purge (the Cache Purge group's only level).
                           e.g. --perm DNS:Edit --perm "Zone Settings:Edit"
                           Append @account or @zone when a name exists at both
                           scopes (Cloudflare publishes some groups twice under
@@ -445,6 +446,7 @@ level_suffix(){
   case "$(lc "$1")" in
     edit|write) printf 'Write' ;;
     read)       printf 'Read' ;;
+    purge)      printf 'Purge' ;;   # Cloudflare's "Cache Purge" group has no Write/Read form
     *)          return 1 ;;
   esac
 }
@@ -492,7 +494,7 @@ split_perm(){
   PERM_BASE="${spec%:*}"; PERM_LEVEL="${spec##*:}"
   [[ -n "$PERM_BASE" ]] || die "malformed --perm '$spec' — empty permission name"
   PERM_SUFFIX="$(level_suffix "$PERM_LEVEL")" \
-    || die "unknown permission level '$PERM_LEVEL' in '$spec' — want Edit or Read"
+    || die "unknown permission level '$PERM_LEVEL' in '$spec' — want Edit, Read or Purge"
 }
 
 # scope_of GROUP_JSON: "zone" or "account", from the group's own scopes field
