@@ -6,6 +6,47 @@
 
 ---
 
+## Prior — 2026-09-11
+
+**M3 shipped: the tool became obtainable.** MIT licence; GitHub Actions running
+the hermetic suite on `ubuntu-latest` and `macos-latest` (no secrets needed —
+`curl` and `az` are PATH stubs, so a full run mints, uses and deletes nothing);
+an Install section documenting clone + symlink; and the repo published, made
+public and tagged `v0.1.0`.
+
+Deliberately no `curl | bash` installer. A tool whose job is careful credential
+handling should not open by asking the reader to pipe a remote script into their
+shell — "read it before you trust it" is the actual pitch, and ~1000 lines of
+auditable shell is what backs it.
+
+**Verified as a stranger, not asserted:** cloned the public URL to a fresh
+directory, symlinked the entry point onto `PATH`, and ran `doctor`, `profiles`,
+`run --dry-run` and the full suite with no credential in the environment. All
+correct; 183 assertions pass.
+
+**Four real bugs were found across M1-M3, none of them findable by reading:**
+
+| bug | how it surfaced |
+|---|---|
+| `--dry-run` required a credential, so the README's *first* command printed a plan with its permissions silently missing | running it the way a newcomer would |
+| `cf()` aborted under `set -u` when no minter was set | only reachable once the first was fixed; caught by a new test, not by hand |
+| a test read a file mode with BSD `stat` syntax; GNU `stat` rejects it but still prints to stdout, poisoning the capture | first time the suite ran outside macOS |
+| a symlink on `PATH` broke the tool outright — `BASH_SOURCE[0]` is the link's path, so sibling tools were invisible | asking "can this go on PATH?" while writing the install docs |
+
+The last two were found while *writing the release walkthrough*, because each
+question carried a factual claim that could not be answered from memory. The
+symlink bug would have been a first-five-minutes failure for every user who
+installed it the normal way.
+
+M2 preceded this and was three rulings rather than a build — see
+PROJECT-SCOPE.md history. Its content: `cf-mint-token.sh` stays supported but
+stops being taught, `profiles.conf` ships its seven as a declared starting set,
+and the repo ships its own tracking.
+
+---
+
+---
+
 ## Prior — 2026-09-10
 
 **M1 shipped.** `cf-minter` is now a single verb-first entry point —

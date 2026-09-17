@@ -216,6 +216,9 @@ profile_names(){ sed -n 's/^profile:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$PROF
 # A permission is "<Name>:<Level>"; the display groups by level because the
 # level is what decides how far a mistake reaches, and an optional @account /
 # @zone disambiguation hint is not part of the name a reader is scanning for.
+# Every level the tools accept (Edit, Read, Purge) has its own line below: a
+# permission at a level the listing did not print would vanish from the one
+# readout whose job is to show the reach.
 perms_at(){
   local want="$1" p name lvl out=""
   for p in "${PROFILE_PERMS[@]}"; do
@@ -234,12 +237,13 @@ perms_at(){
 list_profiles(){
   profiles_file_or_die
   hdr "profiles ($PROFILES_FILE)"
-  local n edits reads
+  local n edits reads purges
   for n in $(profile_names | LC_ALL=C sort); do
     load_profile "$n"
     printf '  %s%s%s  %s · %s\n' "$G" "$n" "$Z" "$PROFILE_SCOPE" "$PROFILE_TTL"
-    edits="$(perms_at Edit)"; reads="$(perms_at Read)"
+    edits="$(perms_at Edit)"; reads="$(perms_at Read)"; purges="$(perms_at Purge)"
     [[ -n "$edits" ]] && printf '    changes  %s\n' "$edits"
+    [[ -n "$purges" ]] && printf '    purges   %s\n' "$purges"
     [[ -n "$reads" ]] && printf '    reads    %s\n' "$reads"
     [[ -n "$PROFILE_WHY" ]] && printf '    for      %s\n' "$PROFILE_WHY"
   done

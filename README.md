@@ -116,7 +116,7 @@ real module boundary — it is just no longer something you have to learn first.
 | `--mint-only` | mint and print the value once, run nothing, do **not** burn — for hand-driven work. Only the TTL ends it |
 | `--minter-cmd <cmd>` | shell command that prints the minter token — the hook for your own secret store |
 | `--minter-token-file <p>` | read the minter from a file's first line |
-| `--perm <Name:Level>` | ad-hoc permission instead of a profile, repeatable (e.g. `--perm DNS:Edit`). Append `@account` or `@zone` to disambiguate a name Cloudflare publishes at both scopes — see below |
+| `--perm <Name:Level>` | ad-hoc permission instead of a profile, repeatable (e.g. `--perm DNS:Edit`). Level is `Edit`, `Read`, or `Purge` — the last only for Cloudflare's `Cache Purge` group, which has no Edit/Read form (`--perm "Cache Purge:Purge"`). Append `@account` or `@zone` to disambiguate a name Cloudflare publishes at both scopes — see below |
 | `--dry-run` | print exactly what would be minted and run; no network calls, nothing created |
 | `--list-profiles` | print the profiles and their reach |
 | `--list-stale` | list `cfsr-*` tokens past the TTL their own name declares — i.e. runs whose burn failed. Exit 1 if any |
@@ -164,9 +164,9 @@ scopes that name *does* offer, rather than as a generic "no such group".
 Profiles live in `profiles.conf`. That file is the only place a profile is
 defined; no code knows one by name.
 
-**These seven are a starting set, not a catalogue.** They cover the work this
+**These eight are a starting set, not a catalogue.** They cover the work this
 tool was built for; they are not an attempt to enumerate Cloudflare. If what you
-need is not here — cache purge, R2, Workers KV, Logpush — adding it is one edit
+need is not here — R2, Workers KV, Logpush — adding it is one edit
 to `profiles.conf` and no code change (see [Adding a profile](#adding-a-profile)),
 or skip profiles entirely with `--perm`.
 
@@ -175,10 +175,16 @@ or skip profiles entirely with `--perm`.
 | `dns-edit` | `DNS:Edit`, `Zone:Read` | zone | 15m |
 | `dns-read` | `DNS:Read`, `Zone:Read` | zone | 15m |
 | `zone-settings` | `Zone Settings:Edit`, `Zone:Read` | zone | 15m |
+| `cache-hygiene` | `Cache Settings:Edit`, `Cache Purge:Purge`, `Zone:Read` | zone | 15m |
 | `zone-harden` | `DNS:Edit`, `Zone Settings:Edit`, `Zone WAF:Edit`, `Firewall Services:Edit`, `SSL and Certificates:Edit`, `Analytics:Read` | zone | 30m |
 | `certs` | `SSL and Certificates:Edit` | zone | 15m |
 | `pages-deploy` | `Pages:Edit`, `Pages:Read` | account | 30m |
 | `workers-deploy` | `Workers Scripts:Edit` | account | 30m |
+
+`cache-hygiene` names the permission group the API publishes: what the dashboard
+labels "Cache Rules · Edit" is `Cache Settings Write` in the catalogue, and
+`Cache Rules:Edit` resolves to nothing. The catalogue is what these tools resolve
+against, so profiles use its names.
 
 A **zone** profile refuses to run without a `--zone`/`--zone-id`; an **account**
 profile refuses to be given one. Both would otherwise hand out reach nobody

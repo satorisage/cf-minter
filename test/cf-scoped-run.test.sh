@@ -263,6 +263,19 @@ else bad "profile listing does not separate changed from read permissions"; fi
 if grep -qE '^[[:space:]]*reads[[:space:]]+DNS, Zone' "$OUT"; then
   ok "…and a read-only profile shows no 'changes' reach at all"
 else bad "dns-read did not render as read-only"; fi
+# Conservation: every permission in the file must appear on some reach line.
+# cache-hygiene carries "Cache Purge:Purge" — a level that is neither Edit nor
+# Read — and a listing that only knew those two levels dropped it silently from
+# the one readout whose job is the blast radius.
+if grep -qE '^[[:space:]]*purges[[:space:]]+Cache Purge' "$OUT"; then
+  ok "…and a Purge-level permission is a 'purges' line, not a silent drop"
+else bad "cache-hygiene's Cache Purge:Purge is missing from the reach listing"; fi
+missing=""
+while IFS= read -r perm; do
+  name="${perm%:*}"
+  grep -qE "^[[:space:]]*(changes|purges|reads)[[:space:]]+.*\b$name\b" "$OUT" || missing="${missing:+$missing, }$perm"
+done < <(sed -n 's/^perm:[[:space:]]*//p' "$(cd "$(dirname "$SCRIPT")" && pwd)/profiles.conf" | sed 's/@.*//' | sort -u)
+if [[ -z "$missing" ]]; then ok "…and every perm: line in profiles.conf reaches some reach line"; else bad "perms in profiles.conf absent from the listing: $missing"; fi
 
 # The profile set the run under test actually reads — the denominator for the
 # conservation check below. Counting against the file the tool reads, rather

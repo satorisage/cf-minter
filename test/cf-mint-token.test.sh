@@ -92,7 +92,7 @@ case "$method $url" in
       # "Access: Apps and Policies Write" is published TWICE under one name at
       # two different scopes. That is real Cloudflare behaviour, not a contrived
       # fixture: it is exactly what made a live mint fail with "2 candidates".
-      body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-aap-write-acct","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account"]},{"id":"pg-aap-write-zone","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-tunnel-write","name":"Cloudflare Tunnel Write","scopes":["com.cloudflare.api.account"]}]}'
+      body='{"success":true,"errors":[],"result":[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-aap-write-acct","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account"]},{"id":"pg-aap-write-zone","name":"Access: Apps and Policies Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-tunnel-write","name":"Cloudflare Tunnel Write","scopes":["com.cloudflare.api.account"]},{"id":"pg-cache-purge","name":"Cache Purge","scopes":["com.cloudflare.api.account.zone"]}]}'
     fi ;;
   "GET "*"/accounts")
     # Reached only when a mint carries an account-scoped permission. Before
@@ -533,6 +533,15 @@ run_mint "$OUT" --name t --perm DNS:Edit --zone example.test; rc=$?
 if [[ "$rc" -eq 0 ]] && grep -q 'pg-dns-write' "$CALLS"; then ok "a unique name still needs no hint"; else bad "unhinted resolution regressed (rc=$rc)"; fi
 run_mint "$OUT" --name t --perm "DNS:Edit@zone" --zone example.test; rc=$?
 if [[ "$rc" -eq 0 ]] && grep -q 'pg-dns-write' "$CALLS"; then ok "…and accepts a redundant but correct hint"; else bad "correct hint on a unique name failed (rc=$rc)"; fi
+
+# Cloudflare's "Cache Purge" group has no Write/Read form — its only level is
+# Purge, and the catalogue name carries no level suffix at all. "Cache
+# Purge:Purge" therefore has no exact match ("Cache Purge Purge") and must
+# resolve through the fallback: name ends with the level, contains the base.
+run_mint "$OUT" --name t --perm "Cache Purge:Purge" --zone example.test; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'pg-cache-purge' "$CALLS"; then ok "'X:Purge' resolves to the level-suffixed catalogue group via the fallback match"; else bad "Cache Purge:Purge did not resolve (rc=$rc) — $(tail -4 "$OUT")"; fi
+run_guarded 5 "$OUT" --name t --perm "Cache Purge:Delete" --zone example.test; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "want Edit, Read or Purge" "$OUT"; then ok "an unknown level is refused offline, naming all three accepted levels"; else bad "unknown level: want exit 2 naming Purge, got $rc — $(tail -3 "$OUT")"; fi
 
 # The dry-run must agree with the live path about which scope a hinted perm
 # lands in, or the plan misrepresents the token it is previewing.
