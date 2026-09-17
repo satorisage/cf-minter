@@ -16,7 +16,8 @@
 *No `ruled:` field recorded on any board or state line.*
 
 That is either a project that has ruled nothing yet, or rulings living as
-unmarked prose — the `ruling-unmarked` drift check tells the two apart.
+unmarked prose — the `ruling-unmarked` drift check tells the two apart, and
+its verdict for this render is in the footer.
 ---
 
-**0 ruling(s) recorded.**
+**0 ruling(s) recorded · ruling-unmarked: clean**
