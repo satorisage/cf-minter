@@ -164,7 +164,7 @@ scopes that name *does* offer, rather than as a generic "no such group".
 Profiles live in `profiles.conf`. That file is the only place a profile is
 defined; no code knows one by name.
 
-**These eight are a starting set, not a catalogue.** They cover the work this
+**These nine are a starting set, not a catalogue.** They cover the work this
 tool was built for; they are not an attempt to enumerate Cloudflare. If what you
 need is not here — R2, Workers KV, Logpush — adding it is one edit
 to `profiles.conf` and no code change (see [Adding a profile](#adding-a-profile)),
@@ -180,6 +180,7 @@ or skip profiles entirely with `--perm`.
 | `certs` | `SSL and Certificates:Edit` | zone | 15m |
 | `pages-deploy` | `Pages:Edit`, `Pages:Read` | account | 30m |
 | `workers-deploy` | `Workers Scripts:Edit` | account | 30m |
+| `web-analytics` | `Account Settings:Edit` | account | 15m |
 
 `cache-hygiene` names the permission group the API publishes: what the dashboard
 labels "Cache Rules · Edit" is `Cache Settings Write` in the catalogue, and
