@@ -180,7 +180,7 @@ or skip profiles entirely with `--perm`.
 | `certs` | `SSL and Certificates:Edit` | zone | 15m |
 | `pages-deploy` | `Pages:Edit`, `Pages:Read` | account | 30m |
 | `workers-deploy` | `Workers Scripts:Edit` | account | 30m |
-| `web-analytics` | `Account Settings:Edit` | account | 15m |
+| `web-analytics` | `Account Settings:Edit`, `Account Settings:Read` | account | 15m |
 
 `cache-hygiene` names the permission group the API publishes: what the dashboard
 labels "Cache Rules · Edit" is `Cache Settings Write` in the catalogue, and
