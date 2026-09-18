@@ -54,7 +54,7 @@ fixture that carries the real group, an unknown level refused offline naming
 Purge, and README coverage of the level and the profile.
 
 **221 assertions, up from 217; all green.** Untouched: the burn trap, the
-secret's path, and the reach of every pre-existing profile. Eight profiles ship;
+secret's path, and the reach of every pre-existing profile. Nine profiles ship;
 "seven as a declared starting set" (M2) was a count, not a cap — the ruling was
 that the set is declared and extended one verified edit at a time, which this is.
 
@@ -202,7 +202,7 @@ registration; re-stamps on the next `bootstrap-project.sh --publish`.
 The tool is finished for its stated purpose. These are noted so they are not
 rediscovered, not because anything is owed:
 
-- **`profiles.conf` coverage.** Eight profiles ship. R2, Workers KV and Logpush
+- **`profiles.conf` coverage.** Nine profiles ship. R2, Workers KV and Logpush
   have no profile. Deliberately not added: permission names resolve by a live
   catalogue read that `--dry-run` does not perform, so a name cannot be verified
   offline, and guessing at vendor strings is the failure this tool refuses by
