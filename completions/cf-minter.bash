@@ -31,15 +31,15 @@ _cf_minter(){
   case "$prev" in
     --profile) COMPREPLY=( $(compgen -W "$(_cf_minter_profiles)" -- "$cur") ); return 0 ;;
     --ttl)     COMPREPLY=( $(compgen -W "30s 5m 15m 30m 1h 2h 8h 1d" -- "$cur") ); return 0 ;;
-    --zone|--zone-id|--slug|--minter-cmd|--minter-token-file) return 0 ;;
+    --perm|--zone|--zone-id|--slug|--minter-cmd|--minter-token-file) return 0 ;;
   esac
 
   case "$verb" in
-    run)  COMPREPLY=( $(compgen -W "--profile --zone --zone-id --ttl --slug --minter-cmd --minter-token-file --dry-run --help --" -- "$cur") ) ;;
-    mint) COMPREPLY=( $(compgen -W "--profile --zone --zone-id --ttl --slug --minter-cmd --minter-token-file --dry-run --help" -- "$cur") ) ;;
+    run)  COMPREPLY=( $(compgen -W "--profile --perm --zone --zone-id --ttl --slug --minter-cmd --minter-token-file --dry-run --help --" -- "$cur") ) ;;
+    mint) COMPREPLY=( $(compgen -W "--profile --perm --zone --zone-id --ttl --slug --minter-cmd --minter-token-file --dry-run --help" -- "$cur") ) ;;
     profiles) COMPREPLY=( $(compgen -W "--names --help" -- "$cur") ) ;;
     list|burn) COMPREPLY=( $(compgen -W "--stale --help" -- "$cur") ) ;;
-    doctor)    COMPREPLY=( $(compgen -W "--help" -- "$cur") ) ;;
+    doctor)    COMPREPLY=( $(compgen -W "--minter-cmd --minter-token-file --help" -- "$cur") ) ;;
   esac
 }
 complete -F _cf_minter cf-minter

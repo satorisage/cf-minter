@@ -67,6 +67,7 @@ _cf-minter(){
     run)
       _arguments -s \
         '--profile[named purpose to mint]:profile:_cf_minter_profiles' \
+        '*--perm[ad-hoc permission, Name:Level]:permission:' \
         '--zone[zone a zone-scoped profile applies to]:zone name:' \
         '--zone-id[the same zone, by id]:zone id:' \
         '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)' \
@@ -80,6 +81,7 @@ _cf-minter(){
     mint)
       _arguments -s \
         '--profile[named purpose to mint]:profile:_cf_minter_profiles' \
+        '*--perm[ad-hoc permission, Name:Level]:permission:' \
         '--zone[zone a zone-scoped profile applies to]:zone name:' \
         '--zone-id[the same zone, by id]:zone id:' \
         '--ttl[how long the token may live]:duration:(30s 5m 15m 30m 1h 2h 8h 1d)' \
@@ -92,7 +94,12 @@ _cf-minter(){
     profiles) _arguments -s '--names[one tab-separated record per profile, for scripts]' '--help[help for this command]' ;;
     list)     _arguments -s '--stale[only leftovers from runs whose burn failed]' '--help[help for this command]' ;;
     burn)     _arguments -s '--stale[sweep leftovers from runs whose burn failed]' '--help[help for this command]' ;;
-    doctor)   _arguments -s '--help[help for this command]' ;;
+    doctor)
+      _arguments -s \
+        '--minter-cmd[command that prints your minter credential]:command:' \
+        '--minter-token-file[file holding your minter credential]:file:_files' \
+        '--help[help for this command]'
+      ;;
   esac
 }
 

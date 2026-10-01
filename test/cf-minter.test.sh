@@ -203,6 +203,27 @@ if grep -q -- '-- mycmd --help' "$BOX/called-args" 2>/dev/null; then
   ok "a --help after '--' is passed through, not intercepted"
 else bad "a wrapped command's --help was swallowed by the dispatcher"; fi
 
+# A documented option missing from its verb's help is invisible at the moment
+# it is needed: run --help once omitted --perm, which the README documents.
+out="$("$BOX/cf-minter" run --help 2>&1)"
+[[ "$out" == *"--perm <Name:Level>"* ]] && ok "run --help documents --perm" \
+                                       || bad "run --help does not list --perm"
+
+echo
+echo "doctor checks the minter the operator named:"
+# doctor once ignored its arguments, so a minter supplied by --minter-cmd was
+# reported as no minter at all. The flags must reach the tool that qualifies
+# the minter, unread, and the "none configured" refusal must not fire first.
+rm -f "$BOX/called-tool" "$BOX/called-args"
+out="$(env -u CF_MINTER_TOKEN -u CF_MINTER_CMD -u CF_MINTER_VAULT_SECRET \
+  "$BOX/cf-minter" doctor --minter-cmd 'printf x' 2>&1)"
+if [[ "$(cat "$BOX/called-tool" 2>/dev/null)" == "cf-mint-token.sh" \
+   && "$(cat "$BOX/called-args" 2>/dev/null)" == "--qualify-minter --minter-cmd printf x" ]]; then
+  ok "doctor --minter-cmd reaches cf-mint-token.sh --qualify-minter with the flag"
+else bad "doctor --minter-cmd routed to '$(cat "$BOX/called-tool" 2>/dev/null)' with '$(cat "$BOX/called-args" 2>/dev/null)'"; fi
+[[ "$out" != *"no minter configured"* ]] && ok "…and does not report 'no minter configured'" \
+                                         || bad "doctor --minter-cmd still reports no minter"
+
 echo
 echo "the machine-readable profile emit that shell completion consumes:"
 # Completion must never parse profiles.conf itself — that file is the one home

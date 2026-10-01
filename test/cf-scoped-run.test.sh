@@ -277,6 +277,21 @@ while IFS= read -r perm; do
 done < <(sed -n 's/^perm:[[:space:]]*//p' "$(cd "$(dirname "$SCRIPT")" && pwd)/profiles.conf" | sed 's/@.*//' | sort -u)
 if [[ -z "$missing" ]]; then ok "…and every perm: line in profiles.conf reaches some reach line"; else bad "perms in profiles.conf absent from the listing: $missing"; fi
 
+# The format's readers must agree on a file saved with CRLF endings or trailing
+# spaces. They once did not: the name list stopped at whitespace while the
+# loader kept the rest of the line, so 'cache-hygiene' was refused by its own
+# name — "Did you mean 'cache-hygiene'?" — and every listing died with it.
+CRLF_CONF="$STUB_DIR/profiles-crlf.conf"
+sed -e 's/$/  /' -e 's/$/\r/' "$(cd "$(dirname "$SCRIPT")" && pwd)/profiles.conf" >"$CRLF_CONF"
+CF_PROFILES_FILE="$CRLF_CONF" run_scoped "$OUT" --list-profiles; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "cache-hygiene" "$OUT" && ! grep -q "unknown profile" "$OUT"; then
+  ok "a profiles file with CRLF endings and trailing spaces lists cleanly"
+else bad "CRLF/trailing-space profiles file: exit $rc, $(grep -m1 FAIL "$OUT")"; fi
+CF_PROFILES_FILE="$CRLF_CONF" run_scoped "$OUT" --profile cache-hygiene --zone-id z1 --dry-run -- true; rc=$?
+if [[ "$rc" -eq 0 ]] && ! grep -q $'\r' "$OUT"; then
+  ok "…and its perms reach the mint plan with no carriage return in them"
+else bad "CRLF profile run: exit $rc, or a CR leaked into the plan"; fi
+
 # The profile set the run under test actually reads — the denominator for the
 # conservation check below. Counting against the file the tool reads, rather
 # than against the tool's own output, is the whole point: a parser that silently

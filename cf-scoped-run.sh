@@ -285,6 +285,12 @@ load_profile(){
   profiles_file_or_die
   PROFILE_PERMS=(); PROFILE_SCOPE=""; PROFILE_TTL=""; PROFILE_WHY=""
   while IFS= read -r line || [[ -n "$line" ]]; do
+    # Trailing whitespace is never meaningful, and a CR is what a Windows
+    # checkout leaves on every line. Kept, it made this reader see
+    # "cache-hygiene\r" where profile_names (which stops at whitespace) saw
+    # "cache-hygiene" — a profile refused by its own name, and a perm value
+    # carrying a CR into the catalogue lookup.
+    line="${line%"${line##*[![:space:]]}"}"
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
     if [[ "$line" =~ ^profile:[[:space:]]*(.*)$ ]]; then

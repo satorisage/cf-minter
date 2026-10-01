@@ -136,6 +136,7 @@ cf-minter run — mint a scoped token, run your command with it, burn it after.
 
 USAGE
   cf-minter run --profile <name> [--zone <zone>] [options] -- <command…>
+  cf-minter run --perm <Name:Level>… [--zone <zone>] [options] -- <command…>
 
   The command goes after '--'. It receives the minted value in the environment
   as CLOUDFLARE_API_TOKEN and CF_SCOPED_TOKEN — never in its arguments.
@@ -143,6 +144,10 @@ USAGE
 OPTIONS
   --profile <name>   which named purpose to mint. 'cf-minter profiles' lists
                      them and the reach each grants.
+  --perm <Name:Level> an ad-hoc permission instead of (or added to) a profile,
+                     repeatable: --perm DNS:Edit. Level is Edit, Read, or Purge
+                     (Purge only for "Cache Purge"). Append @account or @zone
+                     when Cloudflare publishes the name at both scopes.
   --zone <zone>      the zone a zone-scoped profile applies to, by name.
   --zone-id <id>     the same, by id, when you already hold it.
   --ttl <duration>   how long the token may live: 30s, 15m, 2h, 1d. The
@@ -151,6 +156,8 @@ OPTIONS
   --slug <text>      a label folded into the token's name, to tell runs apart.
   --minter-cmd <cmd> a command that prints your minter credential, instead of
                      CF_MINTER_TOKEN in the environment.
+  --minter-token-file <path>
+                     read the minter credential from the file's first line.
   --dry-run          show the whole plan — permissions, zone, expiry, and the
                      exact request — without minting anything or running the
                      command.
@@ -234,7 +241,22 @@ H
 # the dependency checks live here because nothing else owns them, and the minter
 # check delegates to the tool that defines what qualifying means.
 doctor(){
-  [[ "${1:-}" != "--help" ]] || { printf 'cf-minter doctor — check curl, jq, and whether your minter credential qualifies.\n'; exit 0; }
+  # Any other argument is how to find the minter — --minter-cmd, a token file —
+  # and is handed to the mint tool unread. That tool owns how a minter is
+  # resolved and refuses what it does not know; reading the flags here would
+  # give that knowledge a second home.
+  if wants_help "$@"; then cat <<'H'
+cf-minter doctor — check curl, jq, and whether your minter credential qualifies.
+
+USAGE
+  cf-minter doctor [--minter-cmd <cmd> | --minter-token-file <path>]
+
+  With no flag, the minter comes from the environment: CF_MINTER_TOKEN,
+  CF_MINTER_CMD, or CF_MINTER_VAULT_SECRET with OPS_VAULT_NAME — the same
+  sources, in the same order, that 'cf-minter run' uses.
+H
+    exit 0
+  fi
 
   local rc=0
   printf '%sdependencies%s\n' "$B" "$Z"
@@ -248,7 +270,7 @@ doctor(){
   done
 
   printf '\n%sminter credential%s\n' "$B" "$Z"
-  if [[ -z "${CF_MINTER_TOKEN:-}${CF_MINTER_CMD:-}${CF_MINTER_VAULT_SECRET:-}" ]]; then
+  if [[ $# -eq 0 && -z "${CF_MINTER_TOKEN:-}${CF_MINTER_CMD:-}${CF_MINTER_VAULT_SECRET:-}" ]]; then
     printf '  MISS  no minter configured — set CF_MINTER_TOKEN, or pass --minter-cmd\n' >&2
     printf '        %sa minter is a credential carrying "User API Tokens:Edit"; a normal%s\n' "$D" "$Z" >&2
     printf '        %sscoped token cannot create or delete tokens.%s\n' "$D" "$Z" >&2
@@ -256,7 +278,7 @@ doctor(){
   else
     # Qualification is a measurement, never a guess from the name — the mint
     # tool owns what the measurement is.
-    "$MINT" --qualify-minter || rc=1
+    "$MINT" --qualify-minter "$@" || rc=1
   fi
 
   printf '\n'
