@@ -6,6 +6,61 @@
 
 ---
 
+## Prior — 2026-09-16
+
+**An ergonomics pass, inside the ratified position rather than against it.** The
+owner asked for "wow factor," then sharpened it mid-walkthrough to flow —
+completion and low friction, not visual polish. That is what `## Out of scope`
+already defines ergonomics to mean, so the exclusion held and **no scope
+amendment was made**. Four findings, all shipped:
+
+- **Per-verb help.** `cf-minter run --help` had been emitting 105 lines, 104 of
+  them the underlying script's commented header — sibling script names and
+  test-only environment included. The front page advertises that exact command.
+  Each verb now answers in the tool's own voice.
+- **Shell completion, zsh and bash.** Fed by a new `--profile-names` emit from
+  the tool that owns the profile format, so completion never becomes a second
+  parser of `profiles.conf` and adding a profile stays one edit.
+- **`profiles` leads with reach**, split into what a profile changes and what it
+  only reads. Choosing a profile is choosing a blast radius.
+- **A near-miss profile name is answered** with the nearest real one; the
+  refusal still refuses.
+
+**The completion shipped broken, and the tests could not see it.** They asserted
+that the file parses and that `compinit` registers it. Both were true the whole
+time, and both were derived from the same assumption the completion itself was
+making — so they could only confirm the two agreed about what to ignore. TAB
+produced a directory listing: `_arguments` reads the line from `words[1]`, so it
+treated the dispatcher as the command and every verb as an unexpected argument.
+Two more defects sat behind it — candidates collected in a pipeline, so the
+subshell discarded them; specs passed as an expanded array rather than literal
+arguments.
+
+The replacement drives a real interactive zsh through a pseudo-terminal, presses
+an actual TAB, and asserts the candidates — including that no filename appears
+among them, this failure's signature. Verified to bite: reintroducing the bug
+turns 9 passes into 7 failures.
+
+**Then CI went red, which is the system working.** The completion suite had been
+running on macOS only, because zsh is absent from the Ubuntu runner image
+(checked against the manifests, not recalled). Adding it to the Linux leg
+immediately surfaced a second failure: Debian's `/etc/zsh/zshrc` runs a bare
+`compinit` before any `ZDOTDIR/.zshrc`, and on a host with a world-writable
+directory on `fpath` — which a CI runner has — it aborts, taking the completion
+system down before the completion under test loads. Fixed via Debian's own
+documented `skip_global_compinit`. **CI green on both legs, with the completion
+suite observed running on each** (run 35145910123).
+
+The container check that preceded the red push ran as root in a clean image and
+had neither a group-writable `fpath` entry nor Debian's zshrc, so it could not
+have caught it. A check that does not reproduce the environment it claims to
+cover is not evidence — the same lesson the test failure taught, one layer out.
+
+**217 assertions, up from 183.** Untouched throughout: the burn trap, the
+secret's path, what any profile grants, and the `curl` + `jq` runtime.
+
+---
+
 ## Prior — 2026-09-11
 
 **M3 shipped: the tool became obtainable.** MIT licence; GitHub Actions running

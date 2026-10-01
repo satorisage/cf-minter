@@ -1,6 +1,6 @@
 # Project State
 
-**Last updated:** 2026-09-17
+**Last updated:** 2026-10-01
 **Active focus:** **v0.1.0 is released.** https://github.com/satorisage/cf-minter
 is public, MIT-licensed, CI green on Linux and macOS. M1, M2 and M3 are all
 complete, and the project's founding success test — a stranger goes from clone
@@ -10,7 +10,8 @@ passes.
 No milestone is active. There is no committed next milestone; the tool does what
 it was built to do and is obtainable by anyone. Candidate work, none of it
 urgent, is in §7. An unmilestoned ergonomics pass landed 2026-09-13/16, and the
-first profile beyond the starting set on 2026-09-17 — see Current below.
+first profile beyond the starting set on 2026-09-17, and three field-reported
+front-door fixes on 2026-10-01 — see Current and Prior below.
 
 <!-- History cap (D-0072): keep at most the current head + ~1 most-recent
      `**Prior YYYY-MM-DD —**` entry inline here. When you add a newer Prior
@@ -22,7 +23,39 @@ first profile beyond the starting set on 2026-09-17 — see Current below.
 
 ---
 
-## Current — 2026-09-17
+## Current — 2026-10-01
+
+**Three front-door bugs, found by an operator in the field, fixed (`4eb80e2`).**
+A session using cf-minter elsewhere reported them; each was reproduced here
+before it was fixed:
+
+- **`doctor` ignored `--minter-cmd`** — it never read its arguments, so a
+  minter supplied that way was reported as none. Its arguments now go, unread,
+  to `cf-mint-token.sh --qualify-minter`, which owns minter resolution and
+  refuses unknown flags. A first version parsed the flags in the dispatcher and
+  tripped the existing guard that keeps `--minter-token-file` out of its code;
+  the guard was kept and the design changed to fit it.
+- **`run --help` omitted `--perm`** (and `--minter-token-file`), both in the
+  README. Added, with `--perm` in both completions.
+- **CRLF `profiles.conf` refused its own profile** — "unknown profile
+  'cache-hygiene'. Did you mean 'cache-hygiene'?". Two readers of one format
+  disagreed: `profile_names` stopped at whitespace, `load_profile` kept the CR.
+  The loader now trims trailing whitespace from every line, so perm values no
+  longer carry a CR into the catalogue lookup either.
+
+Each has a regression test that fails on the prior code with the reported
+symptom (5 failed there, verified). **226 assertions, up from 221; all green.**
+
+**Drift triage (`43cf591`).** The dotagent L95 handoff was applied:
+`.agent/LENS.md` is now the session-read core, and SCOPE's Overview moved into
+it. `AGENT-SURFACES.txt` is gitignored rather than shipped, because the public
+surface carries no tooling files. The brief got a Triage section and stays in
+place; the stamp records `mcp: already-registered`; the automation register is
+dismissed (opt-in, and CI is the only automation).
+
+---
+
+## Prior — 2026-09-17
 
 **The first profile added since the starting set, and the level the engine
 could not say.** Work on camping4you.net needed a token that could set cache
@@ -60,62 +93,7 @@ that the set is declared and extended one verified edit at a time, which this is
 
 ---
 
-## Prior — 2026-09-16
-
-**An ergonomics pass, inside the ratified position rather than against it.** The
-owner asked for "wow factor," then sharpened it mid-walkthrough to flow —
-completion and low friction, not visual polish. That is what `## Out of scope`
-already defines ergonomics to mean, so the exclusion held and **no scope
-amendment was made**. Four findings, all shipped:
-
-- **Per-verb help.** `cf-minter run --help` had been emitting 105 lines, 104 of
-  them the underlying script's commented header — sibling script names and
-  test-only environment included. The front page advertises that exact command.
-  Each verb now answers in the tool's own voice.
-- **Shell completion, zsh and bash.** Fed by a new `--profile-names` emit from
-  the tool that owns the profile format, so completion never becomes a second
-  parser of `profiles.conf` and adding a profile stays one edit.
-- **`profiles` leads with reach**, split into what a profile changes and what it
-  only reads. Choosing a profile is choosing a blast radius.
-- **A near-miss profile name is answered** with the nearest real one; the
-  refusal still refuses.
-
-**The completion shipped broken, and the tests could not see it.** They asserted
-that the file parses and that `compinit` registers it. Both were true the whole
-time, and both were derived from the same assumption the completion itself was
-making — so they could only confirm the two agreed about what to ignore. TAB
-produced a directory listing: `_arguments` reads the line from `words[1]`, so it
-treated the dispatcher as the command and every verb as an unexpected argument.
-Two more defects sat behind it — candidates collected in a pipeline, so the
-subshell discarded them; specs passed as an expanded array rather than literal
-arguments.
-
-The replacement drives a real interactive zsh through a pseudo-terminal, presses
-an actual TAB, and asserts the candidates — including that no filename appears
-among them, this failure's signature. Verified to bite: reintroducing the bug
-turns 9 passes into 7 failures.
-
-**Then CI went red, which is the system working.** The completion suite had been
-running on macOS only, because zsh is absent from the Ubuntu runner image
-(checked against the manifests, not recalled). Adding it to the Linux leg
-immediately surfaced a second failure: Debian's `/etc/zsh/zshrc` runs a bare
-`compinit` before any `ZDOTDIR/.zshrc`, and on a host with a world-writable
-directory on `fpath` — which a CI runner has — it aborts, taking the completion
-system down before the completion under test loads. Fixed via Debian's own
-documented `skip_global_compinit`. **CI green on both legs, with the completion
-suite observed running on each** (run 35145910123).
-
-The container check that preceded the red push ran as root in a clean image and
-had neither a group-writable `fpath` entry nor Debian's zshrc, so it could not
-have caught it. A check that does not reproduce the environment it claims to
-cover is not evidence — the same lesson the test failure taught, one layer out.
-
-**217 assertions, up from 183.** Untouched throughout: the burn trap, the
-secret's path, what any profile grants, and the `curl` + `jq` runtime.
-
----
-
-<!-- Older entries (2026-09-11 and earlier) rotated to `.agent/PROJECT-STATE-HISTORY.md`
+<!-- Older entries (2026-09-16 and earlier) rotated to `.agent/PROJECT-STATE-HISTORY.md`
      by the history cap, D-0072. Not read at session start. -->
 
 
@@ -133,6 +111,7 @@ know about it.
 | **All ratified design decisions** | `.agent/DECISIONS/` (one file per decision; index in `DECISIONS/README.md`) |
 | **Open check-ins awaiting input** | `.agent/CHECKINS/` (at root; archived live in `CHECKINS/ARCHIVED/`) |
 | **Generated audit / inspect / sweep reports** | `.agent/REPORTS/` (dispositioned ones archive to `REPORTS/ARCHIVED/`; tooling sweeps are local-only and untracked) |
+| **What the project is, right now (session-read core)** | `.agent/LENS.md` |
 | **The vision this was built from** | `.agent/REPORTS/project-brief.md` |
 | **What the corpus looked like at bootstrap** | `.agent/.bootstrap-stamp` |
 
@@ -167,18 +146,13 @@ none — no questions awaiting input.
 
 ## 5. Next session
 
-Nothing is owed. `main` is green (221 assertions) and in sync with origin; no
-milestone is active. The one open item from the 2026-09-16 sweep is dotagent's
-(`mental-models` polish, queued there as `L194`), not this project's.
+Nothing is owed. `main` is green (226 assertions) and in sync with origin; no
+milestone is active.
 
-Drift at 2026-09-17: 3 findings across 25 material checks, all dismissed.
-`automation-state-drift` — standing (opt-in register; CI is the only automation
-and lives in `.github/workflows/test.yml`). `mcp-unregistered` — the stamp
-predates bootstrap recording the outcome; the dotagent MCP server is in fact
-connected in-session, so the finding is a stale stamp, not a missing
-registration; re-stamps on the next `bootstrap-project.sh --publish`.
-`reports-untriaged` on `project-brief.md` — that file is the vision brief the
-§1 authority map points at, not a findings report; nothing to triage.
+Drift at 2026-10-01: 1 material finding, dismissed — `automation-state-drift`
+(opt-in register; CI in `.github/workflows/test.yml` is the only automation).
+The core-budget advisory from the push hook (22 KB `load: always` core, no
+`core-budget:` declared) is not adopted: nothing is refused without it.
 
 ---
 
