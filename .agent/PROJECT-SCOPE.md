@@ -1,5 +1,9 @@
 # Project Scope: cf-minter
 
+<!-- BOUNDARIES ONLY (D-0144). The session-read core is `.agent/LENS.md` (what
+     cf-minter IS, right now — L95, applied 2026-10-01). Session start reads
+     LENS → this file down to `## Reference`. -->
+
 <!-- Locked 2026-09-09 by explicit user ratification ("lock it"). Phase 2 of the
      vision-first bootstrap (DECISION-0026). Vision input:
      .agent/REPORTS/project-brief.md (locked same session). -->
@@ -134,15 +138,6 @@ Hybrid, per the operating manual.
   command.
 
 ## Reference — durable scope, NOT read at session start
-
-## Overview
-
-cf-minter is a public, standalone bash tool that makes a Cloudflare credential
-exist only while your job runs — mint a scope-exact API token, hand it to a
-command, burn it on the way out on success, failure, or Ctrl-C alike. It is for
-anyone who needs Cloudflare access inside a script without leaving a long-lived
-token lying around. Success is a stranger going from clone to a working scoped
-run in under a minute.
 
 ## Pairings
 

@@ -161,3 +161,12 @@ All three are **ergonomics questions, not architecture ones**:
 The bash implementation — `cf-mint-token.sh`, `cf-scoped-run.sh`,
 `lib/cf-retry.sh`, and the `test/` suite — **is staying.** Nothing in this brief
 authorizes deleting or replacing any of it (Principle 18).
+
+## Triage
+
+- **2026-10-01 — retained in place (not an inbox item).** This is the locked
+  Phase 0 vision brief, the bootstrap's *output*, not a findings report. Its
+  consumers (pairings proposal, scope elicitation) ran 2026-09-09; the vision
+  it locked now lives in `.agent/LENS.md` §1. It stays at this path because
+  `PROJECT-SCOPE.md`'s header cites it as the scope's vision input, and moving
+  it would break that provenance pointer.

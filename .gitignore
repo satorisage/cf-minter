@@ -17,6 +17,10 @@
 # so it is local-only rather than part of what a user clones.
 CLAUDE.md
 
+# dotagent: the surface register. Machine-local governance plumbing, read only by
+# the dotagent checks; like CLAUDE.md it is not part of what a user clones.
+AGENT-SURFACES.txt
+
 # dotagent: tooling-sweep reports. These audit the dotagent engines, carry
 # absolute machine paths, and say nothing about cf-minter. Project-specific
 # tracking (scope, state, brief, decisions) IS tracked.
