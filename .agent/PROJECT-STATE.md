@@ -23,7 +23,21 @@ front-door fixes on 2026-10-01 — see Current and Prior below.
 
 ---
 
-## Current — 2026-10-01
+## Current — 2026-10-25
+
+**Reconciled with the ops repo's newer copy (`e5a0058`); cf-minter is now the one minter.**
+The owner ruled (2026-10-24, the font11a seat's ask A4) that cf-minter is canonical.
+worksync, the ops repo, now consumes `cf-mint-token.sh` as a copy vendored at this commit,
+held there by a drift check that fails on any divergence. `e5a0058` brings in what the ops
+copy had gained since 2026-09-17: a vault write probe (`lib/vault-store-probe.sh`), the
+secret value passed to az as a file rather than on argv (this repo's own hard constraint),
+the stored version's expiry through a generic hook (`CF_MINT_EXPIRY_WINDOW_CMD`),
+`A|B:Level` permission alternatives, and the `--list` detail line. Suites at `e5a0058`
+(on a build box): cf-mint-token 150/150, dispatcher 44, cf-scoped-run 71, zsh 9. At base
+`7b1d9ca` the new tests fail 40. Owed: the CI macOS leg (bash 3.2, which no box runs).
+Consumers that wrap the ops copy by path (timeclock) repoint later (font11a ask A5).
+
+## Prior — 2026-10-01
 
 **Three front-door bugs, found by an operator in the field, fixed (`4eb80e2`).**
 A session using cf-minter elsewhere reported them; each was reproduced here
