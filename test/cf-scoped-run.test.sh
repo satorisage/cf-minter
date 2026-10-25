@@ -56,7 +56,11 @@ args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     -X) method="${args[$((i+1))]}" ;;
-    -H) case "${args[$((i+1))]}" in Authorization:*) auth="${args[$((i+1))]#Authorization: Bearer }" ;; esac ;;
+    # The bearer arrives as curl config on stdin (-K -), never as an argument.
+    -K) if [[ "${args[$((i+1))]}" == - ]]; then
+          h="$(sed -n 's/^header = "\(.*\)"$/\1/p')"
+          case "$h" in [Aa]uthorization:*) auth="${h#*[Bb]earer }" ;; esac
+        fi ;;
     -w) wfmt=1 ;;
     --data) data="${args[$((i+1))]}" ;;
     https://*) url="${args[$i]}" ;;

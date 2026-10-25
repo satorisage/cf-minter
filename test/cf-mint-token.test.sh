@@ -36,6 +36,9 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR"' EXIT
 export STUB_DIR
 CALLS="$STUB_DIR/calls.log"
+export AZ_CORE="$HERE/fixtures/az-core.sh"           # what az's core does to an argument; the az stub uses it
+export AZ_PROBE="$HERE/fixtures/az-vault-probe.sh"   # what Key Vault does to the store-write probe's calls
+export VAULT_PROBE_BACKOFF=0                         # the probe's retry backoff, zeroed so a scripted 429 costs no time
 
 # A fabricated token value with the hostile shape of a real one (40 chars of
 # [A-Za-z0-9_-], leading underscore, embedded hyphens) so byte-exact passage
@@ -56,12 +59,19 @@ args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     -X) method="${args[$((i+1))]}" ;;
-    -H) case "${args[$((i+1))]}" in Authorization:*) auth="${args[$((i+1))]#Authorization: Bearer }" ;; esac ;;
+    # The bearer arrives as curl config on stdin (-K -), never as an argument: a
+    # header on argv is ignored, so a call that put the token there carries none.
+    -K) if [[ "${args[$((i+1))]}" == - ]]; then
+          h="$(sed -n 's/^header = "\(.*\)"$/\1/p')"
+          case "$h" in [Aa]uthorization:*) auth="${h#*[Bb]earer }" ;; esac
+        fi ;;
     -w) wfmt=1 ;;
     --data) data="${args[$((i+1))]}" ;;
     https://*) url="${args[$i]}" ;;
   esac
 done
+# The command line as any other process would see it: no credential may appear here.
+printf '%s\n' "$*" >>"$STUB_DIR/curl-argv.log"
 # The request BODY is logged too: the token's policy (which permission groups, on
 # which resources) is the whole point of a mint, and it is only visible here.
 printf 'curl %s %s auth=%s body=%s\n' "$method" "$url" "$auth" "$data" >>"$STUB_DIR/calls.log"
@@ -88,6 +98,9 @@ case "$method $url" in
     if [[ -f "$STUB_DIR/pg.deny" ]]; then
       code=403
       body='{"success":false,"errors":[{"code":9109,"message":"Unauthorized to access requested resource"}],"result":null}'
+    elif [[ -f "$STUB_DIR/catalog.json" ]]; then
+      # A case may stage its own catalogue; otherwise the default below.
+      body="$(cat "$STUB_DIR/catalog.json")"
     else
       # "Access: Apps and Policies Write" is published TWICE under one name at
       # two different scopes. That is real Cloudflare behaviour, not a contrived
@@ -110,7 +123,8 @@ case "$method $url" in
   "POST "*"/user/tokens")
     body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"tok-0001\",\"name\":\"t\",\"value\":\"$tok\"}}" ;;
   "GET "*"/user/tokens")
-    body='{"success":true,"errors":[],"result":[]}' ;;
+    if [[ -f "$STUB_DIR/list.json" ]]; then body="$(cat "$STUB_DIR/list.json")"
+    else body='{"success":true,"errors":[],"result":[]}'; fi ;;
   *)
     body='{"success":false,"errors":[{"code":9999,"message":"stub: unexpected endpoint"}]}' ;;
 esac
@@ -121,7 +135,16 @@ chmod +x "$STUB_DIR/curl"
 # ── stub az ───────────────────────────────────────────────────────────────────
 cat >"$STUB_DIR/az" <<'STUB'
 #!/usr/bin/env bash
-printf 'az %s\n' "$*" >>"$STUB_DIR/calls.log"
+# argv.log records the command line as any other process would see it; calls.log
+# records each command as az's core expands it (an @<file> read in), i.e. as az parses it.
+printf 'argv %s\n' "$*" >>"$STUB_DIR/argv.log"
+# shellcheck source=fixtures/az-core.sh
+source "$AZ_CORE"; az_core_args "$@"
+printf 'az %s\n' "${AZ_CORE_ARGS[*]}" >>"$STUB_DIR/calls.log"
+# The vault-store probe's own calls are answered the way Key Vault would (and can be
+# scripted to refuse); every other call is the no-op success it always was.
+# shellcheck source=fixtures/az-vault-probe.sh
+source "$AZ_PROBE"; if az_vault_probe "$@"; then exit "$AZ_PROBE_RC"; fi
 exit 0
 STUB
 chmod +x "$STUB_DIR/az"
@@ -131,7 +154,7 @@ chmod +x "$STUB_DIR/az"
 # call log. Echoes nothing; exit status is the tool's.
 run_mint(){
   local out="$1"; shift
-  : >"$CALLS"; rm -f "$STUB_DIR/verify.count"
+  : >"$CALLS"; : >"$STUB_DIR/argv.log"; rm -f "$STUB_DIR/verify.count"
   PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" OPS_VAULT_NAME="fake-vault" \
     bash "$SCRIPT" "$@" >"$out" 2>&1 </dev/null
 }
@@ -140,7 +163,7 @@ run_mint(){
 # hangs (the unguarded parser looped forever on a bare trailing flag). 124 = hung.
 run_guarded(){
   local t="$1" out="$2"; shift 2
-  : >"$CALLS"; rm -f "$STUB_DIR/verify.count"
+  : >"$CALLS"; : >"$STUB_DIR/argv.log"; rm -f "$STUB_DIR/verify.count"
   PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" OPS_VAULT_NAME="fake-vault" \
     bash "$SCRIPT" "$@" >"$out" 2>&1 </dev/null &
   local pid=$! i=0
@@ -212,7 +235,7 @@ else
   bad "verify was not made with the minted token's own bearer"
 fi
 vline="$(grep -n "user/tokens/verify" "$CALLS" | head -1 | cut -d: -f1)"
-aline="$(grep -n '^az keyvault secret set' "$CALLS" | head -1 | cut -d: -f1)"
+aline="$(grep -n '^az keyvault secret set ' "$CALLS" | grep -v -- '--name mint-store-probe ' | head -1 | cut -d: -f1)"
 if [[ -n "$vline" && -n "$aline" && "$vline" -lt "$aline" ]]; then
   ok "vault write happens strictly AFTER verify (order: verify line $vline < az line $aline)"
 else
@@ -223,12 +246,17 @@ if grep -q -- "--value $FAKE_TOKEN " "$CALLS" || grep -q -- "--value $FAKE_TOKEN
 else
   bad "vault value differs from the minted value: $(grep '^az' "$CALLS")"
 fi
+if ! grep -qF -- "$FAKE_TOKEN" "$STUB_DIR/argv.log" && grep -q -- '^argv keyvault secret set .*--value @' "$STUB_DIR/argv.log"; then
+  ok "…and never on az's command line: it reaches az as a file az reads (--value @<file>)"
+else
+  bad "the minted value rode az's command line: $(grep '^argv keyvault' "$STUB_DIR/argv.log")"
+fi
 if grep -q "value: $FAKE_TOKEN" "$OUT"; then ok "boxed output shows the exact minted value"; else bad "boxed output does not show the minted value"; fi
 
 echo "200 bad" >"$STUB_DIR/verify.plan"
 run_mint "$OUT" --name t --perm DNS:Edit --zone example.test --vault-secret cf-token; rc=$?
 if [[ "$rc" -eq 1 ]]; then ok "verify failure exits 1"; else bad "verify failure: want exit 1, got $rc"; fi
-if ! grep -q '^az keyvault secret set' "$CALLS"; then
+if ! grep '^az keyvault secret set ' "$CALLS" | grep -qv -- '--name mint-store-probe '; then
   ok "verify failure never writes the vault (existing secret survives)"
 else
   bad "verify failure STILL wrote the vault: $(grep '^az' "$CALLS")"
@@ -548,6 +576,278 @@ if [[ "$rc" -eq 2 ]] && grep -q "want Edit, Read or Purge" "$OUT"; then ok "an u
 PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN=fake bash "$SCRIPT" --dry-run --name t \
   --perm "Access: Apps and Policies:Edit@account" >"$OUT" 2>&1 </dev/null
 if grep -q '@account' "$OUT"; then ok "dry-run echoes the @scope hint back"; else bad "dry-run dropped the hint"; fi
+
+# ── no credential rides curl's command line ───────────────────────────────────
+# argv is world-readable (`ps`, /proc/<pid>/cmdline): the minter and the minted token
+# reach curl only as config on its stdin (-K -).
+echo "credentials stay off curl's command line:"
+: >"$STUB_DIR/curl-argv.log"
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone example.test --vault-secret cf-token; rc=$?
+if [[ "$rc" -eq 0 && -s "$STUB_DIR/curl-argv.log" ]] && ! grep -qF -- "fake-minter-value" "$STUB_DIR/curl-argv.log" \
+   && ! grep -qF -- "$FAKE_TOKEN" "$STUB_DIR/curl-argv.log" && ! grep -qi 'authorization' "$STUB_DIR/curl-argv.log"; then
+  ok "neither the minter nor the minted token appears on any curl command line (mint + verify)"
+else bad "a credential rode curl's argv (rc=$rc): $(grep -iF -e fake-minter -e "$FAKE_TOKEN" -e authorization "$STUB_DIR/curl-argv.log" | head -3)"; fi
+if grep -q 'curl POST .*user/tokens auth=fake-minter-value ' "$CALLS"; then
+  ok "…and the minter still authenticates the mint, from curl's stdin config"
+else bad "the mint call carried no minter bearer: $(grep 'POST' "$CALLS")"; fi
+: >"$STUB_DIR/curl-argv.log"
+: >"$CALLS"
+PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" CF_BURN_TOKEN="$FAKE_TOKEN" \
+  bash "$SCRIPT" --burn >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "curl GET .*user/tokens/verify auth=$FAKE_TOKEN" "$CALLS" \
+   && ! grep -qF -- "$FAKE_TOKEN" "$STUB_DIR/curl-argv.log" && ! grep -qF -- "fake-minter-value" "$STUB_DIR/curl-argv.log"; then
+  ok "--burn's self-verify and delete keep both tokens off argv too"
+else bad "--burn put a credential on argv, or lost its bearer (rc=$rc): $(cat "$STUB_DIR/curl-argv.log")"; fi
+
+# ── the stored version is born stamped (the expiry hook) ──────────────────────
+# Each store makes a new vault version, and a version carries only the expiry its own
+# write gave it — a re-mint stored bare un-stamps the secret. A site's expiry hook
+# names the window; the tool asks it before minting and stamps the same write.
+echo "the stored version carries its expiry:"
+store_line(){ grep '^az keyvault secret set ' "$CALLS" | grep -v -- '--name mint-store-probe ' | head -1; }
+store_expiry(){ sed -n 's/.*--expires \([^ ]*\).*/\1/p' <<<"$(store_line)"; }
+to_epoch(){ date -u -d "$1" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null; }
+HOOK="$STUB_DIR/window-hook"
+# A stub hook: 45 days for "rotated-token" in fake-vault, no window for anything else.
+# It records the arguments it was asked with.
+cat >"$HOOK" <<'H'
+#!/usr/bin/env bash
+printf '%s|%s\n' "$1" "$2" >>"$STUB_DIR/hook.calls"
+[[ "$1" == rotated-token && "$2" == fake-vault ]] && { echo 45; exit 0; }
+exit 3
+H
+chmod +x "$HOOK"
+
+echo "200 ok" >"$STUB_DIR/verify.plan"; rm -f "$STUB_DIR/hook.calls"
+CF_MINT_EXPIRY_WINDOW_CMD="$HOOK" run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token --no-print-value; rc=$?
+EXP="$(store_expiry)"
+if [[ "$rc" -eq 0 && -n "$EXP" ]]; then ok "a secret the hook keeps a window for is stored WITH an expiry"; else bad "it was stored bare (rc=$rc): $(store_line)"; fi
+WANT=$(( $(date -u +%s) + 45 * 86400 )); GOT="$(to_epoch "$EXP")"
+if [[ -n "$GOT" ]] && (( GOT > WANT - 86400 && GOT < WANT + 86400 )); then
+  ok "…at now + the hook's window (45 days)"
+else bad "the stamp '$EXP' is not now + 45 days"; fi
+if [[ "$(cat "$STUB_DIR/hook.calls" 2>/dev/null)" == "rotated-token|fake-vault" ]]; then
+  ok "…the hook was asked once, with the target secret and the target vault"
+else bad "the hook was asked '$(cat "$STUB_DIR/hook.calls" 2>/dev/null)'"; fi
+if grep -q -- "--value $FAKE_TOKEN " <<<"$(store_line)"; then ok "…in the same write as the value (the version is never bare, even briefly)"; else bad "the stamp is not in the value's own write: $(store_line)"; fi
+if ! grep -qF -- "$FAKE_TOKEN" "$STUB_DIR/argv.log" && grep -q -- '^argv keyvault secret set .*--value @[^ ]* --expires [^ ]' "$STUB_DIR/argv.log"; then
+  ok "…and that stamped write still carries the value as a file az reads, never on az's command line"
+else bad "the stamped write put the value on argv, or lost its stamp: $(grep '^argv keyvault' "$STUB_DIR/argv.log")"; fi
+
+echo "200 ok" >"$STUB_DIR/verify.plan"; rm -f "$STUB_DIR/hook.calls"
+CF_MINT_EXPIRY_WINDOW_CMD="$HOOK" run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 2h --vault-secret rotated-token --no-print-value; rc=$?
+POST_EXP="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | grep -o '"expires_on":"[^"]*"' | cut -d'"' -f4)"
+if [[ "$rc" -eq 0 && -n "$POST_EXP" && "$(store_expiry)" == "$POST_EXP" && ! -s "$STUB_DIR/hook.calls" ]]; then
+  ok "a --ttl token is stamped with its own end, and the hook is not asked"
+else bad "a --ttl token's stamp '$(store_expiry)' is not its own end '$POST_EXP' (hook asked: $(cat "$STUB_DIR/hook.calls" 2>/dev/null))"; fi
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+CF_MINT_EXPIRY_WINDOW_CMD="$HOOK" run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret other-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 && -z "$(store_expiry)" ]]; then ok "a secret the hook has no window for (exit 3) is stored without one"; else bad "an unwindowed name got a stamp (rc=$rc): $(store_line)"; fi
+
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 && -z "$(store_expiry)" ]]; then ok "with no hook configured the store is unchanged: no expiry"; else bad "no hook, yet a stamp (rc=$rc): $(store_line)"; fi
+
+# A hook that cannot answer refuses the mint BEFORE a token exists — never a live
+# token stored bare.
+printf '#!/usr/bin/env bash\necho "register unreadable (stub)" >&2\nexit 2\n' >"$STUB_DIR/broken-hook"; chmod +x "$STUB_DIR/broken-hook"
+echo "200 ok" >"$STUB_DIR/verify.plan"
+CF_MINT_EXPIRY_WINDOW_CMD="$STUB_DIR/broken-hook" run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token --no-print-value; rc=$?
+if [[ "$rc" -ne 0 ]] && ! grep -q '^curl ' "$CALLS" && ! grep -q '^az ' "$CALLS" \
+   && grep -qF 'refusing to mint a version it cannot stamp' "$OUT" && grep -qF 'register unreadable (stub)' "$OUT"; then
+  ok "a hook that cannot answer refuses the mint before any call, quoting the hook's own words"
+else bad "a failing hook did not refuse before minting (rc=$rc, POSTs=$(grep -c '^curl POST' "$CALLS"))"; fi
+printf '#!/usr/bin/env bash\necho soon\n' >"$STUB_DIR/word-hook"; chmod +x "$STUB_DIR/word-hook"
+CF_MINT_EXPIRY_WINDOW_CMD="$STUB_DIR/word-hook" run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token --no-print-value; rc=$?
+if [[ "$rc" -ne 0 ]] && ! grep -q '^curl ' "$CALLS" && grep -qF "answered 'soon'" "$OUT"; then
+  ok "a hook that answers something other than a number of days refuses the mint, offline"
+else bad "a non-numeric hook answer was not refused (rc=$rc): $(tail -2 "$OUT")"; fi
+
+# The default hook: lib/cf-mint-expiry-window.sh beside the tool, when present.
+ISO="$(mktemp -d)"; mkdir -p "$ISO/lib"
+cp "$SCRIPT" "$ISO/cf-mint-token.sh"; cp "$HERE"/../lib/*.sh "$ISO/lib/"
+cp "$HOOK" "$ISO/lib/cf-mint-expiry-window.sh"
+echo "200 ok" >"$STUB_DIR/verify.plan"; : >"$CALLS"; : >"$STUB_DIR/argv.log"; rm -f "$STUB_DIR/verify.count" "$STUB_DIR/hook.calls"
+PATH="$STUB_DIR:$PATH" CF_MINTER_TOKEN="fake-minter-value" OPS_VAULT_NAME="fake-vault" \
+  bash "$ISO/cf-mint-token.sh" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token --no-print-value >"$OUT" 2>&1 </dev/null; rc=$?
+if [[ "$rc" -eq 0 && -n "$(store_expiry)" && "$(cat "$STUB_DIR/hook.calls" 2>/dev/null)" == "rotated-token|fake-vault" ]]; then
+  ok "a hook at lib/cf-mint-expiry-window.sh is found with no configuration"
+else bad "the default hook path was not used (rc=$rc): $(store_line)"; fi
+rm -rf "$ISO"
+
+run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]] && ! grep -q -- '--expires' "$OUT"; then
+  ok "a dry run with no hook plans an unstamped store and calls nothing"
+else bad "dry run (no hook): rc=$rc $(grep 'secret set' "$OUT")"; fi
+CF_MINT_EXPIRY_WINDOW_CMD="$HOOK" run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret rotated-token; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]] && grep -qF -- "--expires <now + 45 days" "$OUT"; then
+  ok "a dry run states the hook's stamp in its plan, still calling nothing"
+else bad "dry run (hook): rc=$rc $(grep 'secret set' "$OUT")"; fi
+
+# ── a permission the vendor spells two ways ───────────────────────────────────
+# Its own references disagree for one grant: the dashboard says "Account Filter Lists
+# Edit", the API reference's table "Account Rule Lists Write". A --perm may name
+# alternatives ("A|B:Edit"), and a write grant resolves to the "Edit" spelling only
+# where no "Write" group exists — so every name that resolved before resolves to the
+# same group now.
+echo "names spelled two ways (alternatives, and Edit only where no Write exists):"
+catalog(){ printf '{"success":true,"errors":[],"result":%s}' "$1" >"$STUB_DIR/catalog.json"; }
+LISTS_ALT="Account Filter Lists|Account Rule Lists:Edit"
+export CF_ACCOUNT_ID=acct-test
+echo "200 ok" >"$STUB_DIR/verify.plan"
+
+catalog '[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-rule-lists-write","name":"Account Rule Lists Write","scopes":["com.cloudflare.api.account"]}]'
+run_mint "$OUT" --name t --perm "$LISTS_ALT" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -qF "resolved $LISTS_ALT  ->  Account Rule Lists Write (account-scoped)" "$OUT"; then
+  ok "the second alternative resolves when the first spelling is absent from the catalogue"
+else bad "alternatives did not resolve (rc=$rc): $(grep -E 'resolve|FAIL' "$OUT" | head -3)"; fi
+if grep -q 'curl POST .*user/tokens auth=fake-minter-value body=.*pg-rule-lists-write.*com.cloudflare.api.account.acct-test' "$CALLS"; then
+  ok "…and the minted token carries that group on the account"
+else bad "the POST body does not carry the resolved group on the account: $(grep 'POST' "$CALLS")"; fi
+
+catalog '[{"id":"pg-filter-lists-edit","name":"Account Filter Lists Edit","scopes":["com.cloudflare.api.account"]}]'
+run_mint "$OUT" --name t --perm "Account Filter Lists:Edit" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -qF "resolved Account Filter Lists:Edit  ->  Account Filter Lists Edit (account-scoped)" "$OUT"; then
+  ok "an Edit-spelled group resolves when the catalogue has no Write spelling"
+else bad "the Edit spelling did not resolve (rc=$rc): $(grep -E 'resolve|FAIL' "$OUT" | head -3)"; fi
+
+catalog '[{"id":"pg-zs-edit","name":"Zone Settings Edit","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-zs-write","name":"Zone Settings Write","scopes":["com.cloudflare.api.account.zone"]}]'
+run_mint "$OUT" --name t --perm "Zone Settings:Edit" --zone-id zone-xyz-777 --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -qF "resolved Zone Settings:Edit  ->  Zone Settings Write (zone-scoped)" "$OUT" && ! grep -q 'pg-zs-edit' "$CALLS"; then
+  ok "where both spellings exist, Write still wins — a name that resolved before resolves to the same group"
+else bad "the Write spelling lost its precedence (rc=$rc): $(grep -E 'resolve|FAIL' "$OUT" | head -3)"; fi
+
+# Alternatives and the @scope hint compose: a spelling that exists only at the other
+# scope does not shadow a later spelling that exists at the hinted one.
+catalog '[{"id":"pg-a-zone","name":"Thing A Write","scopes":["com.cloudflare.api.account.zone"]},{"id":"pg-b-acct","name":"Thing B Write","scopes":["com.cloudflare.api.account"]}]'
+run_mint "$OUT" --name t --perm "Thing A|Thing B:Edit@account" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'pg-b-acct' "$CALLS" && ! grep -q 'pg-a-zone' "$CALLS"; then
+  ok "with an @scope hint, the first alternative AT that scope wins"
+else bad "the hint and alternatives did not compose (rc=$rc): $(grep -E 'resolve|FAIL|none is' "$OUT" | head -3)"; fi
+run_mint "$OUT" --name t --perm "Thing A:Edit@account" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -q "named 'Thing A Write', but none is @account" "$OUT"; then
+  ok "…and a name that exists only at the other scope still says so"
+else bad "wrong-scope report regressed (rc=$rc): $(tail -3 "$OUT")"; fi
+
+catalog '[{"id":"pg-dns-write","name":"DNS Write","scopes":["com.cloudflare.api.account.zone"]}]'
+run_mint "$OUT" --name t --perm "$LISTS_ALT" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -qF "looked for 'Account Filter Lists Write' | 'Account Filter Lists Edit' | 'Account Rule Lists Write' | 'Account Rule Lists Edit'" "$OUT"; then
+  ok "no alternative in the catalogue: exit 1, naming every name tried"
+else bad "an unresolvable alternative set did not refuse by name (rc=$rc): $(grep -E 'resolve|FAIL' "$OUT" | head -3)"; fi
+if ! grep -q 'curl POST .*user/tokens ' "$CALLS"; then ok "…and nothing was minted"; else bad "a token was minted despite an unresolved permission"; fi
+
+for spec in "Account Filter Lists||Account Rule Lists:Edit" "Account Filter Lists|:Edit" "|Account Rule Lists:Edit"; do
+  run_mint "$OUT" --name t --perm "$spec" --no-print-value --value-file "$STUB_DIR/alt-value"; rc=$?
+  if [[ "$rc" -eq 2 ]] && grep -q 'an empty alternative' "$OUT" && [[ ! -s "$CALLS" ]]; then ok "'$spec' is a usage error before any network call"
+  else bad "'$spec' was not refused offline (rc=$rc): $(tail -2 "$OUT"; head -2 "$CALLS")"; fi
+done
+
+run_mint "$OUT" --name t --perm "$LISTS_ALT" --dry-run; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -qF "the first live group of 'Account Filter Lists Write' | 'Account Filter Lists Edit' | 'Account Rule Lists Write' | 'Account Rule Lists Edit'" "$OUT" \
+   && grep -q 'com.cloudflare.api.account.<account-id>' "$OUT" && [[ ! -s "$CALLS" ]]; then
+  ok "the dry run names every alternative, places an Account group on the account, and calls nothing"
+else bad "the dry run did not render the alternatives offline (rc=$rc): $(grep -E 'would resolve' "$OUT")"; fi
+rm -f "$STUB_DIR/catalog.json"; unset CF_ACCOUNT_ID
+
+# ── the vault proves it takes a WRITE before anything is minted ───────────────
+# The store after a mint has been refused live (a lapsed write activation): the token
+# was then live at Cloudflare and kept nowhere. A read of the target cannot rule that
+# out — a role that reads but cannot write answers it — so the preflight is a real
+# secret write of a throwaway disabled version, read back, before any Cloudflare call.
+echo "the vault store is proven writable before the mint:"
+probe_reset(){ rm -f "$STUB_DIR"/probe.*; }
+first_curl(){ grep -n '^curl ' "$CALLS" | head -1 | cut -d: -f1; }
+probe_write_line(){ grep -n '^az keyvault secret set .*--name mint-store-probe ' "$CALLS" | head -1 | cut -d: -f1; }
+target_writes(){ grep '^az keyvault secret set ' "$CALLS" | grep -v -- '--name mint-store-probe ' || true; }
+echo "200 ok" >"$STUB_DIR/verify.plan"
+
+probe_reset; touch "$STUB_DIR/probe.deny"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -q "vault preflight FAILED for vault 'fake-vault' secret 'cf-token'" "$OUT" \
+   && grep -q "Forbidden" "$OUT" && grep -q "no token was created" "$OUT"; then
+  ok "a vault that refuses the write refuses the mint by name (exit 1), carrying the vault's own words"
+else bad "a write-denied vault did not refuse by name (rc=$rc): $(tail -4 "$OUT")"; fi
+if ! grep -q '^curl ' "$CALLS"; then ok "…before ANY Cloudflare call — nothing minted, nothing to orphan"; else bad "Cloudflare was called despite the refused write: $(grep '^curl' "$CALLS")"; fi
+if [[ -z "$(target_writes)" ]]; then ok "…and the target secret was never written"; else bad "the target was written after a refused probe: $(target_writes)"; fi
+
+probe_reset
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+pw="$(probe_write_line)"; fc="$(first_curl)"
+if [[ "$rc" -eq 0 && -n "$pw" && -n "$fc" && "$pw" -lt "$fc" ]]; then
+  ok "a vault that takes the write lets the mint proceed — the probe write lands before the first Cloudflare call (az line $pw < curl line $fc)"
+else bad "probe/mint order wrong (rc=$rc, probe line '$pw', first curl '$fc'): $(tail -3 "$OUT")"; fi
+if grep -q '^az keyvault secret set --vault-name fake-vault --name mint-store-probe .*--disabled true --expires [0-9]\{4\}-01-01T00:00:00Z' "$CALLS"; then
+  ok "…the probe is a new version of the vault's ONE probe secret, written disabled and stamped far past any expiry window in the write itself"
+else bad "the probe write is not a disabled version of the fixed probe name: $(grep 'mint-store-probe' "$CALLS")"; fi
+if grep -q '^az keyvault secret list-versions --vault-name fake-vault --name mint-store-probe' "$CALLS"; then
+  ok "…and is read back (the version's own attributes) before the mint"
+else bad "the probe was not read back: $(grep 'mint-store-probe' "$CALLS")"; fi
+if grep -q '^az keyvault secret show-deleted --vault-name fake-vault --name cf-token' "$CALLS"; then
+  ok "…and the target name is asked whether it is held deleted"
+else bad "the target's deleted state was not asked: $(grep '^az' "$CALLS")"; fi
+if ! grep -qE '^az keyvault secret (delete|purge) ' "$CALLS" && ! grep -q '^[a-z]* true$' "$STUB_DIR/probe.versions"; then
+  ok "…and it is cleaned up without a delete: every probe version is disabled, no name left reserved by soft-delete"
+else bad "the probe left an enabled version or deleted a name: $(cat "$STUB_DIR/probe.versions"; grep -E 'delete|purge' "$CALLS")"; fi
+if ! grep 'mint-store-probe' "$CALLS" | grep -qF -- "$FAKE_TOKEN"; then ok "…and the probe never carries the minted value"; else bad "the minted value reached the probe write"; fi
+if [[ -n "$(target_writes)" ]]; then ok "…and the real store still follows"; else bad "the real store did not happen after a passing probe"; fi
+if ! grep -q '^az keyvault secret show --vault-name fake-vault --name cf-token' "$CALLS"; then
+  ok "…and the old read-only preflight (a read of the target) is gone — a read proves nothing about a write"
+else bad "the preflight still reads the target: $(grep 'secret show ' "$CALLS")"; fi
+
+probe_reset; touch "$STUB_DIR/probe.target-deleted"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -q "target secret 'cf-token' is held deleted-but-recoverable" "$OUT" && ! grep -q '^curl ' "$CALLS"; then
+  ok "a target name held deleted-but-recoverable refuses the mint by name, before Cloudflare"
+else bad "a soft-deleted target did not refuse before the mint (rc=$rc): $(tail -3 "$OUT")"; fi
+
+probe_reset; echo 2 >"$STUB_DIR/probe.throttle"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 && "$(grep -c '^az keyvault secret set .*--name mint-store-probe ' "$CALLS")" -eq 3 ]]; then
+  ok "a throttled vault (429 twice) is retried, and the mint proceeds once the write is taken"
+else bad "the probe did not ride a transient 429 (rc=$rc, writes $(grep -c 'name mint-store-probe ' "$CALLS")): $(tail -3 "$OUT")"; fi
+
+probe_reset; touch "$STUB_DIR/probe.deleted"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q '^az keyvault secret recover --vault-name fake-vault --name mint-store-probe' "$CALLS" && grep -q "it was recovered" "$OUT"; then
+  ok "a deleted PROBE name heals itself: recovered, the write retried, the mint proceeds, and the run says so"
+else bad "a deleted probe name did not self-heal (rc=$rc): $(tail -3 "$OUT")"; fi
+
+probe_reset; touch "$STUB_DIR/probe.readdeny"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 1 ]] && grep -q "read-back" "$OUT" && ! grep -q '^curl ' "$CALLS"; then
+  ok "a write that cannot be read back refuses the mint (an unproven write is not a proven store)"
+else bad "an unreadable probe write did not refuse (rc=$rc): $(tail -3 "$OUT")"; fi
+
+probe_reset; touch "$STUB_DIR/probe.keep-enabled"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token --no-print-value; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'secrets/mint-store-probe/' "$STUB_DIR/probe.disabled" 2>/dev/null; then
+  ok "a probe version that reads back ENABLED is disabled after the fact — the probe never leaves a usable object"
+else bad "an enabled probe version was left enabled (rc=$rc): $(cat "$STUB_DIR/probe.disabled" 2>/dev/null)"; fi
+
+probe_reset
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --no-print-value --value-file "$STUB_DIR/noprobe-value"; rc=$?
+if [[ "$rc" -eq 0 ]] && ! grep -q 'mint-store-probe' "$CALLS"; then
+  ok "a mint with no vault store makes no probe (nothing to prove)"
+else bad "a vault-less mint probed a vault (rc=$rc): $(grep 'mint-store-probe' "$CALLS")"; fi
+
+run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --vault-secret cf-token; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]] && grep -q "would first prove vault 'fake-vault' takes a secret write" "$OUT"; then
+  ok "the dry run states the write probe in its plan and still calls nothing"
+else bad "the dry run did not plan the probe offline (rc=$rc): $(grep -i probe "$OUT")"; fi
+probe_reset
+
+# ── --list: a detail line under each row, never a value ───────────────────────
+echo "--list carries a tab-free detail line:"
+printf '%s' '{"success":true,"errors":[],"result":[{"id":"tok-aaa","status":"active","name":"cfsr-1-t60-x","issued_on":"2026-01-01T00:00:00Z","expires_on":"2026-01-01T00:01:00Z","last_used_on":null,"policies":[{"effect":"allow","permission_groups":[{"name":"DNS Write"}],"resources":{"z1":"*"}}]}]}' >"$STUB_DIR/list.json"
+run_mint "$OUT" --list; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q $'^  tok-aaa  active\tcfsr-1-t60-x$' "$OUT" \
+   && grep -q '^      issued=2026-01-01T00:00:00Z  expires=2026-01-01T00:01:00Z  last_used=never  policies=allow:\[DNS Write\]@1$' "$OUT" \
+   && [[ "$(grep -c $'\t' "$OUT")" -eq 1 ]]; then
+  ok "each row keeps its '<id>  <status><TAB><name>' shape, and its detail line carries no tab (the stale sweep skips it)"
+else bad "--list rows changed shape (rc=$rc): $(cat "$OUT")"; fi
+rm -f "$STUB_DIR/list.json"
 
 # ── summary ───────────────────────────────────────────────────────────────────
 echo

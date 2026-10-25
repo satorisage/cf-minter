@@ -21,15 +21,23 @@
 #   200 (measured 2026-07-26: no other vaulted Cloudflare token passes that probe;
 #   the operator token verifies active but cannot mint). It is
 #   NEVER a command-line argument (argv is visible in `ps`) and is NEVER printed:
-#   it lives only in the Authorization: Bearer header built inside cf(). So
+#   it reaches curl only as an Authorization: Bearer header written as curl
+#   config on curl's stdin (lib/curl-bearer.sh), never on curl's argv. So
 #   --dry-run output is always safe to paste into a runbook or a log.
 #
 # WHAT IT DOES (mint mode):
+#   0. With --vault-secret: prove the vault takes a secret WRITE before anything is
+#      minted — a throwaway disabled version of the vault's probe secret, read back
+#      (lib/vault-store-probe.sh) — and that the target name is not held deleted.
+#      Either failing refuses here with exit 1, before any Cloudflare call, so a
+#      store that would be refused never leaves a live token behind.
 #   1. Resolve each requested permission by NAME -> its permission-group UUID,
 #      via GET /user/tokens/permission_groups. You name permissions in human
 #      terms (DNS:Edit, Zone Settings:Edit, SSL and Certificates:Edit,
 #      Firewall Services:Edit, DNSSEC:Edit, User API Tokens:Edit). Edit maps to
-#      the group's "Write" variant, Read to its "Read" variant.
+#      the group's "Write" variant (then, only where none exists, its "Edit"
+#      spelling), Read to its "Read" variant. "Name A|Name B:Level" names one
+#      permission the vendor spells two ways; the first that exists wins.
 #   2. Resolve each --zone <name> -> its zone id, via GET /zones?name=<name>. A
 #      caller that already HOLDS the zone id (automation reading it from its own
 #      config, where the id — not the name — is the authoritative value) passes
@@ -75,6 +83,24 @@
 #      named per instance belongs in the per-instance credential vault instead, and
 #      the caller names it: --vault-name "$INSTANCE_CREDS_VAULT_NAME". The minter is
 #      always read from the ops vault either way — it is fleet-shared.
+#
+#      The value reaches az as a private file az reads itself (lib/az-secret-file.sh),
+#      never on az's command line. The stored version carries its expiry from birth
+#      when one is known: the token's own end when it was minted with --ttl, else the
+#      rotation window a site's expiry hook names for that secret (see EXPIRY HOOK
+#      below). A version written bare would un-stamp a secret whose versions are
+#      expected to expire, so the hook is asked BEFORE anything is minted, and a hook
+#      that cannot answer refuses the mint.
+#
+# EXPIRY HOOK (optional; absent = versions are stored without an expiry, as always):
+#   CF_MINT_EXPIRY_WINDOW_CMD, else lib/cf-mint-expiry-window.sh beside this tool
+#   when that file exists (run with bash). Called with two arguments, the target
+#   secret name and the target vault name, and only when --vault-secret is given
+#   and the token has no --ttl. It answers on its exit code:
+#     0  stdout is a whole number of days: the version expires that long from now.
+#     3  this secret (in this vault) has no window: store it without an expiry.
+#     *  anything else refuses the mint, quoting the hook's own words.
+#   A dry run asks it too, so its plan can state the stamp — it must be a local read.
 #
 # WHAT IT DOES (revoke / burn mode):
 #   The full token lifecycle — mint, use, delete — lives in this one tool, so an
@@ -150,6 +176,8 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
                             --perm "Access: Apps and Policies:Edit@account"
                           Optional: names that are unique need no hint, and an
                           ambiguous one tells you the exact flag to add.
+                          "Name A|Name B:Level" names one permission the vendor
+                          spells two ways; the first in the live catalogue wins.
   --zone <zonename>       zone to scope zone-permissions to, repeatable.
                           e.g. --zone example.com --zone example.org
                           Omit -> the token is account-scoped only (no zone perms).
@@ -188,9 +216,11 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
   --qualify-minter        measure whether the supplied credential can actually
                           mint (GET /user/tokens/permission_groups must succeed),
                           and print the verdict. Mints nothing.
-  --list                  list existing tokens (id + status + name, no values)
-                          instead of minting. Ignores --name/--perm/--zone.
-                          Pass an id shown here to --revoke to delete that token.
+  --list                  list existing tokens (id + status + name, then a
+                          detail line: issued / expires / last used + a policy
+                          summary — never a value) instead of minting. Ignores
+                          --name/--perm/--zone. Pass an id shown here to
+                          --revoke to delete that token.
   --revoke <token-id>     delete (revoke) the token with this id via
                           DELETE /user/tokens/<id>, using the minter. The id is
                           what --list shows. Ignores --name/--perm/--zone.
@@ -227,6 +257,11 @@ Env:
                           default --vault-name write target.
   CF_ACCOUNT_ID           pin the account id (skips GET /accounts; used when the
                           minter can see more than one account).
+  CF_MINT_EXPIRY_WINDOW_CMD  the expiry hook (see the header): a command asked
+                          the rotation window, in days, for a --vault-secret
+                          stored without --ttl. Default: lib/cf-mint-expiry-window.sh
+                          beside this tool, when it exists; else no expiry.
+  VAULT_PROBE_SECRET_NAME the vault's write-probe secret (default mint-store-probe).
 
 Examples:
   # See what already exists before minting (avoid duplicates):
@@ -331,6 +366,17 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/lib/cf-retry.sh"
+# The token reaches curl as config on stdin, never argv.
+# shellcheck source=lib/curl-bearer.sh
+source "$HERE/lib/curl-bearer.sh"
+# The minted value reaches the vault as a private file az reads itself, never
+# az's argv (defines az_secrets_from_files; no side effect on source).
+# shellcheck source=lib/az-secret-file.sh
+source "$HERE/lib/az-secret-file.sh"
+# The vault proves it takes a write before anything is minted (defines
+# vault_store_probe; no side effect on source).
+# shellcheck source=lib/vault-store-probe.sh
+source "$HERE/lib/vault-store-probe.sh"
 
 # cf(): the CF API curl helper. On --dry-run it prints the METHOD + PATH + BODY it
 # would send and runs nothing — the Bearer token lives only in the header, which is
@@ -361,10 +407,11 @@ cf(){
   # -sS (not -fsS): on a 4xx/5xx Cloudflare's JSON error body IS the diagnosis —
   # -f would discard it and leave cf_ok able to say only "request failed".
   # cf_ok checks .success on every response, so HTTP errors still fail hard.
-  local args=(-sS -X "$method" "https://api.cloudflare.com/client/v4/$path"
-              -H "Authorization: Bearer $bearer" -H "Content-Type: application/json")
+  # The bearer reaches curl as config on stdin (-K -), never argv.
+  local args=(-sS -K - -X "$method" "https://api.cloudflare.com/client/v4/$path"
+              -H "Content-Type: application/json")
   [[ -n "$body" ]] && args+=(--data "$body")
-  curl "${args[@]}"
+  curl_bearer_config "$bearer" | curl "${args[@]}"
 }
 
 # cf_ok(): run a real CF call and fail hard if the API reports success=false. CF
@@ -392,9 +439,9 @@ cf_ok(){
 # error and returns 1 otherwise. The token lives only in the Bearer header.
 verify_minted_token(){
   local token="$1" vresp
-  local args=(-sS -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"
-              -H "Authorization: Bearer $token" -H "Content-Type: application/json")
-  vresp="$(cf_call_with_retry "${args[@]}")" || vresp=""
+  local args=(-sS -K - -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"
+              -H "Content-Type: application/json")
+  vresp="$(curl_bearer_config "$token" | cf_call_with_retry "${args[@]}")" || vresp=""
   if [[ "$(jq -r '.success // false' <<<"$vresp" 2>/dev/null)" == "true" && \
         "$(jq -r '.result.status // empty' <<<"$vresp" 2>/dev/null)" == "active" ]]; then
     return 0
@@ -459,16 +506,18 @@ level_suffix(){
 account_scoped_hint(){
   case "$(lc "$1")" in
     "user api tokens"|"api tokens"|"account api tokens"|"account settings"|\
-    "account rulesets"|"account waf"|"memberships"|"billing") return 0 ;;
+    "account rulesets"|"account waf"|"memberships"|"billing"|"notifications") return 0 ;;
+    account\ *) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Split a "Name:Level" spec into its base name and level; validate the level.
-# Sets PERM_BASE / PERM_LEVEL / PERM_SUFFIX. Dies (exit 2) on a malformed spec —
-# this is the offline "unknown perm" precondition (before any API call).
-# split_perm SPEC: parse "Name:Level" or "Name:Level@scope" into PERM_BASE,
-# PERM_LEVEL, PERM_SUFFIX and PERM_SCOPE (empty when no hint was given).
+# split_perm SPEC: parse "Name:Level" or "Name:Level@scope" into PERM_NAMES (the
+# name part exactly as written), PERM_BASE (the first alternative), PERM_BASES
+# (every alternative, in the order given), PERM_LEVEL, PERM_SUFFIX, PERM_SUFFIXES
+# (the level's spellings, preferred first) and PERM_SCOPE (empty when no hint was
+# given). Dies (exit 2) on a malformed spec — this is the offline "unknown perm"
+# precondition (before any API call).
 #
 # The @scope hint exists because Cloudflare publishes some permission groups
 # TWICE under one name, differing only in scope — "Access: Apps and Policies
@@ -477,8 +526,14 @@ account_scoped_hint(){
 # without a hint the only honest thing is to refuse. The hint says which one you
 # meant; it stays optional because most names are unique and requiring it
 # everywhere would be noise.
+#
+# Alternatives: "Name A|Name B:Edit" names ONE permission the vendor spells more
+# than one way — its own references disagree (the dashboard says "Account Filter
+# Lists Edit", the API reference "Account Rule Lists Write" for the same grant).
+# Resolution walks them in order and takes the first that exists in the live
+# catalogue; a single name behaves exactly as it always did.
 split_perm(){
-  local spec="$1"
+  local spec="$1" b alts=() i
   PERM_SCOPE=""
   # Strip the scope hint first: the permission name itself may contain ':' and
   # ' ', but never '@', so this split is unambiguous whichever comes first.
@@ -495,6 +550,32 @@ split_perm(){
   [[ -n "$PERM_BASE" ]] || die "malformed --perm '$spec' — empty permission name"
   PERM_SUFFIX="$(level_suffix "$PERM_LEVEL")" \
     || die "unknown permission level '$PERM_LEVEL' in '$spec' — want Edit, Read or Purge"
+  PERM_NAMES="$PERM_BASE"
+  IFS='|' read -r -a alts <<<"$PERM_BASE"
+  PERM_BASES=()
+  for ((i=0; i<${#alts[@]}; i++)); do
+    b="${alts[$i]}"
+    b="${b#"${b%%[![:space:]]*}"}"; b="${b%"${b##*[![:space:]]}"}"   # trim
+    [[ -n "$b" ]] || die "malformed --perm '$spec' — an empty alternative between the '|'s"
+    PERM_BASES+=("$b")
+  done
+  # A trailing '|' leaves no element for read -a to split off; refuse it the same way.
+  [[ "$PERM_BASE" != *"|" ]] || die "malformed --perm '$spec' — an empty alternative between the '|'s"
+  PERM_BASE="${PERM_BASES[0]}"
+  # The API names a write grant "<Name> Write"; the dashboard (and parts of the API
+  # reference) say "<Name> Edit". Write stays first, so a name that resolved before
+  # resolves to the same group now; Edit is tried only where Write found nothing.
+  if [[ "$PERM_SUFFIX" == Write ]]; then PERM_SUFFIXES=(Write Edit); else PERM_SUFFIXES=("$PERM_SUFFIX"); fi
+}
+
+# perm_candidates: the names resolution will try for the last split_perm, in order,
+# as one display string ('A Write' | 'A Edit' | 'B Write' …).
+perm_candidates(){
+  local b s out=""
+  for b in "${PERM_BASES[@]}"; do
+    for s in "${PERM_SUFFIXES[@]}"; do out="${out:+$out | }'$b $s'"; done
+  done
+  printf '%s' "$out"
 }
 
 # scope_of GROUP_JSON: "zone" or "account", from the group's own scopes field
@@ -525,7 +606,16 @@ list_tokens(){
   fi
   # Lead each row with the id — it is what --revoke takes — then status, then name.
   printf '  %-34s %-9s %s\n' "ID" "STATUS" "NAME"
-  jq -r '.result[] | "  \(.id)  \(.status)\t\(.name)"' <<<"$resp"
+  # The row shape "  <id>  <status>\t<name>" is a CONTRACT: cf-scoped-run.sh's
+  # stale-token sweep parses it (tab = the name boundary). The census fields —
+  # issued_on / expires_on / last_used_on and the policy summary (effect,
+  # permission-group names, resource count per policy) — go on a SECOND, tab-free
+  # line under each row, so the sweep skips them and a human reads them in place.
+  # Same GET as before; no extra scope beyond what --list already carries.
+  jq -r '.result[]
+    | "  \(.id)  \(.status)\t\(.name)",
+      "      issued=\(.issued_on // "-")  expires=\(.expires_on // "never")  last_used=\(.last_used_on // "never")  policies=\([ .policies[]? | "\(.effect):[\([.permission_groups[]?.name] | join(","))]@\(.resources | length)" ] | join(" ") | if . == "" then "-" else . end)"' <<<"$resp"
+  info "detail line: issued/expires/last_used are Cloudflare's own stamps (never = no expiry / never used); policies = effect:[permission groups]@resource-count"
   info "$n token(s). Values are shown only once at creation and cannot be listed."
   info "to delete one: --revoke <id> (or --burn to delete by value via CF_BURN_TOKEN)."
 }
@@ -643,6 +733,37 @@ mint_token(){
     fi
   fi
 
+  # A stored version is BORN with its expiry stamp when the site keeps a rotation
+  # window for it. Each store makes a new vault version, and a version carries only
+  # the expiry its own write gave it — so a re-mint stored bare un-stamps the secret
+  # until someone re-stamps it by hand. The window is asked of the site's expiry hook
+  # (see EXPIRY HOOK in the header), and asked HERE, before anything is minted: a hook
+  # that cannot answer refuses the mint, rather than creating a live token and then
+  # storing a version nothing expires. A token minted with --ttl carries its own end,
+  # which is the truer stamp, and the hook is not asked.
+  STORE_WINDOW_DAYS=""
+  if [[ -n "$VAULT_SECRET" && -z "$TTL_SECONDS" ]]; then
+    local hook="${CF_MINT_EXPIRY_WINDOW_CMD:-}"
+    if [[ -z "$hook" && -f "$HERE/lib/cf-mint-expiry-window.sh" ]]; then
+      hook="bash $(printf '%q' "$HERE/lib/cf-mint-expiry-window.sh")"
+    fi
+    if [[ -n "$hook" ]]; then
+      # The answer is the hook's stdout alone; its stderr is kept apart so a warning
+      # can never be read as part of the number, and is quoted in a refusal.
+      local wout werr wrc=0 werrf
+      werrf="$(mktemp "${TMPDIR:-/tmp}/cf-mint-window.XXXXXX")" || die "could not create a scratch file to read the expiry hook's answer"
+      wout="$(eval "$hook"' "$VAULT_SECRET" "$VAULT_NAME"' 2>"$werrf" </dev/null)" || wrc=$?
+      werr="$(cat "$werrf" 2>/dev/null)"; rm -f "$werrf"
+      case "$wrc" in
+        0) [[ "$wout" =~ ^[0-9]+$ ]] \
+             || die "the expiry hook answered '$wout' for $VAULT_SECRET, not a number of days${werr:+ ($werr)} — refusing to mint a version it cannot stamp"
+           STORE_WINDOW_DAYS="$wout" ;;
+        3) : ;;
+        *) die "could not read the expiry window for $VAULT_SECRET from the expiry hook ($hook, rc=$wrc): ${werr:-${wout:-<no output>}} — refusing to mint a version it cannot stamp" ;;
+      esac
+    fi
+  fi
+
   if [[ "$DRY_RUN" -eq 1 ]]; then mint_dry_run; else mint_live; fi
 }
 
@@ -658,7 +779,9 @@ mint_dry_run(){
   for p in "${PERMS[@]}"; do
     split_perm "$p"
     want="$PERM_BASE $PERM_SUFFIX"
-    if [[ -n "$PERM_SCOPE" ]]; then
+    if [[ ${#PERM_BASES[@]} -gt 1 ]]; then
+      info "would resolve permission: $p  ->  the first live group of $(perm_candidates)${PERM_SCOPE:+, @$PERM_SCOPE}"
+    elif [[ -n "$PERM_SCOPE" ]]; then
       info "would resolve permission: $p  ->  group named '$want', @$PERM_SCOPE"
     else
       info "would resolve permission: $p  ->  permission group named '$want'"
@@ -716,6 +839,12 @@ mint_dry_run(){
   fi
   body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires")"
 
+  if [[ -n "$VAULT_SECRET" ]]; then
+    info "would first prove vault '$VAULT_NAME' takes a secret write, before any Cloudflare call:"
+    info "  az keyvault secret set --vault-name $VAULT_NAME --name $VAULT_PROBE_SECRET_NAME --disabled true (a throwaway disabled version), read back,"
+    info "  and refuse if '$VAULT_SECRET' is held deleted-but-recoverable. Either failing: nothing minted, exit 1."
+  fi
+
   hdr "policy JSON that WOULD be sent"
   jq . <<<"$body"
 
@@ -732,7 +861,13 @@ mint_dry_run(){
     info "only after verify passes: write the value to '$VALUE_FILE' (created mode 0600, value never printed)"
   fi
   if [[ -n "$VAULT_SECRET" ]]; then
-    info "only after verify passes: az keyvault secret set --vault-name $VAULT_NAME --name $VAULT_SECRET --value <token> (value never printed)"
+    local stamp_plan=""
+    if [[ -n "$TTL_SECONDS" ]]; then
+      stamp_plan=" --expires <the token's own end, now + $TTL>"
+    elif [[ -n "${STORE_WINDOW_DAYS:-}" ]]; then
+      stamp_plan=" --expires <now + ${STORE_WINDOW_DAYS} days, the expiry hook's window for $VAULT_SECRET>"
+    fi
+    info "only after verify passes: az keyvault secret set --vault-name $VAULT_NAME --name $VAULT_SECRET --value <token>$stamp_plan (value never printed)"
   fi
   hdr "dry run complete — no token was created"
 }
@@ -764,24 +899,20 @@ mint_live(){
   # 0. Vault-store preflight — prove the vault will take the write BEFORE a live
   #    token exists. The way this has actually failed is a lapsed role activation
   #    on the vault: the mint succeeded, the store was refused, and the live token
-  #    was orphaned. A read of the target secret exercises the same auth path
-  #    (a lapsed activation refuses reads and writes alike), so it catches that
-  #    class here, while there is still nothing to orphan. It is a READ probe, so
-  #    a write-only denial can still slip through — which is why the store below
-  #    also prints its real error when it fails.
+  #    was orphaned. A read of the target cannot rule that out (a role that reads
+  #    but cannot write answers a read), so this is a real secret write — a
+  #    disabled version of the vault's probe secret, read back — plus a check that
+  #    the target name is not held in the deleted state, which refuses a store the
+  #    same way. Either failing refuses here, while there is nothing to orphan.
+  #    The store below still prints its real error if it fails anyway.
   if [[ -n "$VAULT_SECRET" ]]; then
-    local pre_err
-    if ! pre_err=$(az keyvault secret show --vault-name "$VAULT_NAME" \
-           --name "$VAULT_SECRET" --output none 2>&1); then
-      if [[ "$pre_err" == *SecretNotFound* ]]; then
-        pass "vault preflight: '$VAULT_NAME' reachable ('$VAULT_SECRET' does not exist yet — the store will create it)"
-      else
-        fail "vault preflight FAILED for vault '$VAULT_NAME' secret '$VAULT_SECRET' — refusing to mint while the store would fail:"
-        fail "  ${pre_err:-<no error output>}"
-        die "fix vault access first (activate the vault role / check the vault name) — no token was created" 1
-      fi
+    if vault_store_probe secret "$VAULT_NAME" "$VAULT_SECRET"; then
+      pass "vault preflight: '$VAULT_NAME' took a secret write (probe '$VAULT_PROBE_SECRET_NAME' version ${VAULT_PROBE_VERSION:0:8}…, written disabled) — the store below will be accepted"
+      [[ -z "$VAULT_PROBE_NOTE" ]] || warn "vault preflight: $VAULT_PROBE_NOTE"
     else
-      pass "vault preflight: '$VAULT_NAME'/'$VAULT_SECRET' readable — the store below will write a new version"
+      fail "vault preflight FAILED for vault '$VAULT_NAME' secret '$VAULT_SECRET' — refusing to mint while the store would fail:"
+      fail "  ${VAULT_PROBE_ERR:-<no error output>}"
+      die "fix vault access first (activate the vault's write role / check the vault name) — no token was created" 1
     fi
   fi
 
@@ -789,52 +920,68 @@ mint_live(){
   local pg_all
   pg_all="$(cf_ok "fetch permission groups" GET "user/tokens/permission_groups")"
 
-  local zone_pg='[]' acct_pg='[]' p want match n_match pg_id pg_name pg_scope
+  local zone_pg='[]' acct_pg='[]' p want match n_match pg_id pg_name pg_scope b s
+  local unscoped unscoped_want
   for p in "${PERMS[@]}"; do
     split_perm "$p"
-    want="$PERM_BASE $PERM_SUFFIX"
-    # Exact (case-insensitive) name match first.
-    match="$(jq -c --arg n "$want" \
-      '[.result[] | select((.name|ascii_downcase) == ($n|ascii_downcase))]' <<<"$pg_all")"
-    n_match="$(jq -r 'length' <<<"$match")"
-    if [[ "$n_match" -eq 0 ]]; then
-      # Fall back to a contains-match on the base + matching level suffix.
-      match="$(jq -c --arg b "$PERM_BASE" --arg s "$PERM_SUFFIX" \
-        '[.result[] | select((.name|ascii_downcase|endswith(" " + ($s|ascii_downcase))) and (.name|ascii_downcase|contains($b|ascii_downcase)))]' <<<"$pg_all")"
-      n_match="$(jq -r 'length' <<<"$match")"
-    fi
-
-    # Narrow by the @scope hint when one was given. Applied AFTER matching so a
-    # wrong hint reports "no candidate with that scope" rather than silently
-    # behaving like no match at all.
-    if [[ -n "$PERM_SCOPE" && "$n_match" -gt 0 ]]; then
-      local scoped='[]' cand i
-      for (( i=0; i<n_match; i++ )); do
-        cand="$(jq -c --argjson i "$i" '.[$i]' <<<"$match")"
-        [[ "$(scope_of "$cand")" == "$PERM_SCOPE" ]] \
-          && scoped="$(jq -c --argjson c "$cand" '. + [$c]' <<<"$scoped")"
+    # For each alternative in order, and each spelling of the level in order: an
+    # exact (case-insensitive) name match first, then a contains-match on the base +
+    # that level suffix. The first step that finds anything decides; with one
+    # alternative and the Write spelling this is exactly the resolution it always was.
+    #
+    # With an @scope hint a step decides only when it finds a group AT that scope, so
+    # a spelling that exists only at the other scope does not shadow a later one that
+    # matches. A step that found groups at the wrong scope is kept to report: when no
+    # step matches at the hinted scope, a wrong hint says "none is @scope" rather
+    # than behaving like no match at all.
+    n_match=0; match='[]'; want=""; unscoped='[]'; unscoped_want=""
+    for b in "${PERM_BASES[@]}"; do
+      for s in "${PERM_SUFFIXES[@]}"; do
+        want="$b $s"
+        match="$(jq -c --arg n "$want" \
+          '[.result[] | select((.name|ascii_downcase) == ($n|ascii_downcase))]' <<<"$pg_all")"
+        n_match="$(jq -r 'length' <<<"$match")"
+        if [[ "$n_match" -eq 0 ]]; then
+          match="$(jq -c --arg b "$b" --arg s "$s" \
+            '[.result[] | select((.name|ascii_downcase|endswith(" " + ($s|ascii_downcase))) and (.name|ascii_downcase|contains($b|ascii_downcase)))]' <<<"$pg_all")"
+          n_match="$(jq -r 'length' <<<"$match")"
+        fi
+        if [[ -n "$PERM_SCOPE" && "$n_match" -gt 0 ]]; then
+          local scoped='[]' cand i
+          for (( i=0; i<n_match; i++ )); do
+            cand="$(jq -c --argjson i "$i" '.[$i]' <<<"$match")"
+            [[ "$(scope_of "$cand")" == "$PERM_SCOPE" ]] \
+              && scoped="$(jq -c --argjson c "$cand" '. + [$c]' <<<"$scoped")"
+          done
+          if [[ "$(jq -r 'length' <<<"$scoped")" -eq 0 ]]; then
+            [[ "$unscoped" != "[]" ]] || { unscoped="$match"; unscoped_want="$want"; }
+            n_match=0; match='[]'
+            continue
+          fi
+          match="$scoped"
+          n_match="$(jq -r 'length' <<<"$match")"
+        fi
+        [[ "$n_match" -eq 0 ]] || break 2
       done
-      if [[ "$(jq -r 'length' <<<"$scoped")" -eq 0 ]]; then
-        fail "--perm '$p': found $n_match group(s) named '$want', but none is @$PERM_SCOPE."
-        printf '%s  what that name actually offers:%s\n' "$Y" "$Z" >&2
-        jq -r '.[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$match" >&2
-        exit 1
-      fi
-      match="$scoped"
-      n_match="$(jq -r 'length' <<<"$match")"
-    fi
+    done
 
+    if [[ "$n_match" -eq 0 && "$unscoped" != "[]" ]]; then
+      fail "--perm '$p': found $(jq -r 'length' <<<"$unscoped") group(s) named '$unscoped_want', but none is @$PERM_SCOPE."
+      printf '%s  what that name actually offers:%s\n' "$Y" "$Z" >&2
+      jq -r '.[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$unscoped" >&2
+      exit 1
+    fi
     if [[ "$n_match" -gt 1 ]]; then
       fail "--perm '$p' is ambiguous — $n_match permission groups share the name '$want':"
       jq -r '.[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$match" >&2
       printf '%s  Cloudflare publishes some groups under one name at both scopes.%s\n' "$Y" "$Z" >&2
       printf '%s  Say which you mean by appending @account or @zone:%s\n' "$Y" "$Z" >&2
-      printf '      --perm "%s:%s@account"\n' "$PERM_BASE" "$PERM_LEVEL" >&2
-      printf '      --perm "%s:%s@zone"\n' "$PERM_BASE" "$PERM_LEVEL" >&2
+      printf '      --perm "%s:%s@account"\n' "$PERM_NAMES" "$PERM_LEVEL" >&2
+      printf '      --perm "%s:%s@zone"\n' "$PERM_NAMES" "$PERM_LEVEL" >&2
       exit 1
     fi
     if [[ "$n_match" -eq 0 ]]; then
-      fail "could not resolve --perm '$p' (looked for '$want') — no such permission group."
+      fail "could not resolve --perm '$p' (looked for $(perm_candidates)) — no such permission group."
       printf '%s  available permission groups (name — scope):%s\n' "$Y" "$Z" >&2
       jq -r '.result | sort_by(.name)[] | "    \(.name)  [\(.scopes // [] | join(", "))]"' <<<"$pg_all" >&2
       exit 1
@@ -974,7 +1121,8 @@ mint_live(){
     fi
   fi
 
-  # 7. Optional: land it in the ops vault (value passed to az, never printed).
+  # 7. Optional: land it in the ops vault (the value reaches az as a private file it
+  #    reads itself — az_secrets_from_files — never on its command line; never printed).
   #    Reached only after the verify gate above, so an existing working secret
   #    is never replaced by a value Cloudflare has not confirmed.
   if [[ -n "$VAULT_SECRET" ]]; then
@@ -984,10 +1132,20 @@ mint_live(){
     # error is exactly how this failure once cost a live instrument-the-path
     # session to diagnose. The token value is scrubbed from the captured text
     # before printing, so the one-print rule above still holds.
-    local store_err=""
-    if store_err=$(az keyvault secret set --vault-name "$VAULT_NAME" --name "$VAULT_SECRET" \
-         --value "$token" --output none 2>&1); then
-      pass "stored in vault '$VAULT_NAME' as secret '$VAULT_SECRET' (value not printed)"
+    local store_err="" stamp=() stamp_note=""
+    # The version is written with its expiry in the same call (see the stamp decision
+    # in mint_token): the token's own end when it has one, else the expiry hook's
+    # window from now — never a bare version of a secret the hook keeps a window for.
+    if [[ -n "$expires" ]]; then
+      stamp=(--expires "$expires")
+      stamp_note=", expiry stamped $expires (the token's own end)"
+    elif [[ -n "${STORE_WINDOW_DAYS:-}" ]]; then
+      stamp=(--expires "$(epoch_to_rfc3339 "$(( $(date -u +%s) + STORE_WINDOW_DAYS * 86400 ))")")
+      stamp_note=", expiry stamped ${stamp[1]} (the expiry hook's ${STORE_WINDOW_DAYS}-day window for $VAULT_SECRET)"
+    fi
+    if store_err=$(az_secrets_from_files az keyvault secret set --vault-name "$VAULT_NAME" --name "$VAULT_SECRET" \
+         --value "$token" ${stamp[@]+"${stamp[@]}"} --output none 2>&1); then
+      pass "stored in vault '$VAULT_NAME' as secret '$VAULT_SECRET' (value not printed)$stamp_note"
     else
       store_err="${store_err//"$token"/<redacted>}"
       fail "vault store FAILED: ${store_err:-<no error output>}"

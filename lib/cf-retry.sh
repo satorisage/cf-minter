@@ -92,14 +92,20 @@ cf_call_with_retry() {
   # attached numeric value like -m30 can't false-match); a letters-only attached
   # value containing 'f' (e.g. -ofile) would be misread, but no cf caller passes
   # one and the wrapper exists for this tool's cf_* helpers.
-  # The same pass also notes whether any argument names /dev/stdin (e.g. the
-  # `-H @/dev/stdin` the stdin-feeding callers use) — that reference is what decides
+  # The same pass also notes whether any argument reads stdin — an argument naming
+  # /dev/stdin (the `-H @/dev/stdin` header-file callers), a config file of `-`
+  # (`-K -` / `--config -`, the callers whose credential arrives as curl config
+  # from lib/curl-bearer.sh) or a value of `@-` — that reference is what decides
   # whether piped stdin gets buffered below.
-  local _fail_mode=0 _wants_stdin=0 _arg
+  local _fail_mode=0 _wants_stdin=0 _arg _prev=""
   for _arg in "$@"; do
     case "$_arg" in
-      */dev/stdin*) _wants_stdin=1 ;;
+      */dev/stdin*|-K-|@-) _wants_stdin=1 ;;
     esac
+    case "$_prev" in
+      -K|--config) [ "$_arg" = "-" ] && _wants_stdin=1 ;;
+    esac
+    _prev="$_arg"
     case "$_arg" in
       --fail) _fail_mode=1 ;;
       --*) : ;;
@@ -112,13 +118,15 @@ cf_call_with_retry() {
   done
 
   # Buffer piped stdin once so it can be replayed on every attempt — but ONLY when
-  # the caller's curl args actually read stdin (an argument naming /dev/stdin).
-  # Callers that feed the Authorization header via `-H @/dev/stdin` need this:
-  # stdin is consumed by the first curl, so a naive re-run on retry would send no
-  # auth header and manufacture the very 401 we are trying to ride out. A non-tty
-  # stdin ALONE is not a signal to buffer: a backgrounded run inherits an
-  # open-but-silent pipe as fd 0, and an unconditional read on it blocks forever —
-  # a call that carries its auth in argv must never wait on stdin it will not use.
+  # the caller's curl args actually read stdin (see the scan above). The callers feed
+  # the Authorization header on stdin — as a header file (`-H @/dev/stdin`) or as
+  # curl config (`-K -`); stdin is consumed by the first curl, so a naive re-run on
+  # retry would send no auth header and manufacture the very 401 we are trying to
+  # ride out. The replay drops a trailing newline, which both forms read the same
+  # (curl takes a last config or header line with no newline). A non-tty stdin
+  # ALONE is not a signal to buffer: a backgrounded run inherits an open-but-silent
+  # pipe as fd 0, and an unconditional read on it blocks forever — a call that does
+  # not read stdin must never wait on stdin it will not use.
   local _stdin_buf="" _have_stdin=0
   if [ "$_wants_stdin" -eq 1 ] && [ ! -t 0 ]; then
     _stdin_buf="$(cat)"

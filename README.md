@@ -159,6 +159,22 @@ The hint is **optional** — unique names need none, and a redundant but correct
 one is accepted. A hint no candidate satisfies is reported as such, with the
 scopes that name *does* offer, rather than as a generic "no such group".
 
+### When one permission has two names
+
+The reverse also happens: Cloudflare's own references spell some grants two
+ways (the dashboard says `Account Filter Lists Edit`, the API reference
+`Account Rule Lists Write`). Name every spelling, separated by `|`; the first
+one the live catalogue has wins:
+
+```bash
+--perm "Account Filter Lists|Account Rule Lists:Edit"
+```
+
+An `Edit` level resolves to the group's `Write` spelling first and to an `Edit`
+spelling only where no `Write` group exists, so a name that resolved before
+still resolves to the same group. An `@account`/`@zone` hint composes with the
+alternatives: the first spelling that exists *at that scope* wins.
+
 ## Profiles
 
 Profiles live in `profiles.conf`. That file is the only place a profile is
@@ -288,6 +304,27 @@ Staleness is read back out of the token's own name
 (`cfsr-<mint-epoch>-t<ttl-seconds>-<slug>`), so there is no state file to drift,
 and tokens outside that convention are never touched.
 
+## Storing a minted token in Azure Key Vault
+
+`cf-mint-token.sh --vault-secret <name>` (with `--vault-name`, or
+`OPS_VAULT_NAME`) stores the minted value once it verifies. Three guarantees
+hold on that path:
+
+- **The store is proven before the mint.** A throwaway, disabled version of the
+  vault's probe secret (`mint-store-probe`, or `VAULT_PROBE_SECRET_NAME`) is
+  written and read back, and the target name is checked for a soft-deleted
+  copy, before any Cloudflare call. A vault that would refuse the store refuses
+  the mint instead, so no live token is ever created with nowhere to go.
+- **The value never rides `az`'s command line.** It reaches `az` as a private
+  file `az` reads itself (`--value @<file>`); argv is world-readable in `ps`.
+- **The version can be born with its expiry.** A token minted with `--ttl` is
+  stamped with its own end. Otherwise, if you keep rotation windows, point
+  `CF_MINT_EXPIRY_WINDOW_CMD` at a command (or drop an executable script at
+  `lib/cf-mint-expiry-window.sh`); it is called with the secret and vault names
+  and answers a whole number of days on stdout (exit 0), or exit 3 for "no
+  window". Anything else refuses the mint before a token exists. With no hook,
+  versions are stored without an expiry, as before.
+
 ## Requirements
 
 `curl` and `jq`. `az` only if you use the optional Key Vault path. Bash 3.2+
@@ -302,6 +339,7 @@ nothing and deletes nothing:
 bash test/run-all.sh
 ```
 
-Covered: the mint/verify/store gate, TTL and value-file handling, profile
+Covered: the mint/verify/store gate, the vault write probe, the value kept off
+curl's and az's command lines, the expiry hook, TTL and value-file handling, profile
 resolution and scope refusals, minter precedence and named refusals, and the
 burn on success, on command failure, and on SIGINT.
