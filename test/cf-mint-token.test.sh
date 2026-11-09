@@ -121,7 +121,15 @@ case "$method $url" in
       body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"${url##*/}\"}}"
     fi ;;
   "POST "*"/user/tokens")
-    body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"tok-0001\",\"name\":\"t\",\"value\":\"$tok\"}}" ;;
+    # Echo the request's condition back, as Cloudflare does, unless condition.drop
+    # exists, which plays an API that silently ignored it.
+    cond="$(jq -c '.condition // empty' <<<"$data" 2>/dev/null)"
+    [[ -f "$STUB_DIR/condition.drop" ]] && cond=""
+    if [[ -n "$cond" ]]; then
+      body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"tok-0001\",\"name\":\"t\",\"value\":\"$tok\",\"condition\":$cond}}"
+    else
+      body="{\"success\":true,\"errors\":[],\"result\":{\"id\":\"tok-0001\",\"name\":\"t\",\"value\":\"$tok\"}}"
+    fi ;;
   "GET "*"/user/tokens")
     if [[ -f "$STUB_DIR/list.json" ]]; then body="$(cat "$STUB_DIR/list.json")"
     else body='{"success":true,"errors":[],"result":[]}'; fi ;;
@@ -419,6 +427,39 @@ if [[ "$rc" -eq 2 ]]; then ok "--ttl 0 is refused (a token born expired can only
 run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --ttl 1h; rc=$?
 if [[ "$rc" -eq 0 && ! -s "$CALLS" ]]; then ok "--ttl --dry-run stays offline"; else bad "--ttl dry-run: exit $rc, calls: $(cat "$CALLS")"; fi
 if grep -q '"expires_on"' "$OUT"; then ok "…and the dry-run body shows the expiry it would send"; else bad "dry-run body lacks expires_on"; fi
+
+# ── --allow-ip: the token only works from the named client ranges ─────────────
+# An unrestricted token from a silently ignored condition is the failure to rule
+# out, so the stub can play an API that drops the condition (condition.drop).
+echo "--allow-ip (client IP restriction):"
+echo "200 ok" >"$STUB_DIR/verify.plan"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --allow-ip 203.0.113.184/29 --allow-ip 2001:db8::/48; rc=$?
+POST_BODY="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | sed 's/^.*body=//')"
+if [[ "$rc" -eq 0 && "$(jq -c '.condition.request_ip.in' <<<"$POST_BODY")" == '["203.0.113.184/29","2001:db8::/48"]' ]]; then
+  ok "the POST body carries condition.request_ip.in with every --allow-ip"
+else bad "--allow-ip body wrong: rc=$rc $POST_BODY"; fi
+if grep -q "only works from: 203.0.113.184/29, 2001:db8::/48" "$OUT"; then ok "…and the echoed restriction is confirmed"; else bad "no confirmation line: $(tail -5 "$OUT")"; fi
+
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777; rc=$?
+POST_BODY="$(grep '^curl POST .*user/tokens ' "$CALLS" | head -1 | sed 's/^.*body=//')"
+if [[ "$(jq 'has("condition")' <<<"$POST_BODY")" == "false" ]]; then ok "no --allow-ip sends no condition"; else bad "condition leaked: $POST_BODY"; fi
+
+touch "$STUB_DIR/condition.drop"
+run_mint "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --allow-ip 203.0.113.184/29 --value-file "$STUB_DIR/v.out" --no-print-value; rc=$?
+rm -f "$STUB_DIR/condition.drop"
+if [[ "$rc" -eq 1 ]] && grep -q '^curl DELETE .*user/tokens/tok-0001' "$CALLS"; then
+  ok "a token that comes back without the restriction is revoked and the mint fails"
+else bad "unrestricted token not revoked: rc=$rc $(grep -E '^curl (DELETE|POST)' "$CALLS")"; fi
+if [[ ! -s "$STUB_DIR/v.out" ]]; then ok "…and its value is stored nowhere"; else bad "unrestricted value was written"; fi
+rm -f "$STUB_DIR/v.out"
+
+run_guarded 5 "$OUT" --name t --perm DNS:Edit --zone-id zone-xyz-777 --allow-ip 10.0.0.1; rc=$?
+if [[ "$rc" -eq 2 ]] && grep -q "malformed --allow-ip" "$OUT" && [[ ! -s "$CALLS" ]]; then
+  ok "a bare address (no prefix) is a usage error, caught offline"
+else bad "malformed --allow-ip accepted: exit $rc"; fi
+
+run_mint "$OUT" --dry-run --name t --perm DNS:Edit --zone-id zone-xyz-777 --allow-ip 203.0.113.184/29; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLS" ]] && grep -q '"request_ip"' "$OUT"; then ok "--allow-ip --dry-run shows the condition and stays offline"; else bad "--allow-ip dry-run: exit $rc"; fi
 
 # ── --value-file: the machine-readable handle for a wrapping tool ─────────────
 # A wrapper that must hold the value (mint, run a command with it, burn it) gets

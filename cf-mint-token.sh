@@ -157,6 +157,7 @@ NAME=""; VAULT_SECRET=""; VAULT_NAME=""; MODE="mint"; REVOKE_ID=""
 PERMS=(); ZONES=(); ZONE_IDS=()
 PRINT_VALUE=1
 TTL=""; TTL_SECONDS=""; VALUE_FILE=""
+ALLOW_IPS=()
 DRY_RUN="${DRY_RUN:-0}"
 
 usage(){
@@ -190,6 +191,13 @@ them to the UUIDs Cloudflare's token API wants. Every mint creates a NEW token
                           or a bare number of seconds. Cloudflare refuses the
                           token past that moment even if nobody burns it — the
                           floor under an ephemeral mint-use-burn token.
+  --allow-ip <cidr>       only accept the token from this client address range
+                          (IPv4/IPv6 CIDR), repeatable. Sent as the token's
+                          condition.request_ip.in; after the POST the condition
+                          Cloudflare echoes back is checked, and a token that came
+                          back without it is revoked and the mint fails, so an
+                          ignored restriction can never leave an open token.
+                          (Cloudflare does not apply it to /user/tokens/verify.)
   --value-file <path>     also write the minted value to this file (created mode
                           0600), strictly AFTER the verify gate — for a wrapping
                           tool that must hold the value programmatically instead
@@ -294,6 +302,7 @@ while [[ $# -gt 0 ]]; do
     --zone-id)       need_arg "$1" "${2:-}"; ZONE_IDS+=("$2"); shift 2 ;;
     --ttl)           need_arg "$1" "${2:-}"; TTL="$2"; shift 2 ;;
     --value-file)    need_arg "$1" "${2:-}"; VALUE_FILE="$2"; shift 2 ;;
+    --allow-ip)      need_arg "$1" "${2:-}"; ALLOW_IPS+=("$2"); shift 2 ;;
     --no-print-value) PRINT_VALUE=0; shift ;;
     --minter-cmd)    need_arg "$1" "${2:-}"; CF_MINTER_CMD="$2"; shift 2 ;;
     --minter-token-file) need_arg "$1" "${2:-}"; CF_MINTER_TOKEN_FILE="$2"; shift 2 ;;
@@ -716,6 +725,13 @@ mint_token(){
       || die "malformed --ttl '$TTL' — want a positive duration: <n>[s|m|h|d] (e.g. 30m, 1h, 3600)"
   fi
 
+  # Validate every --allow-ip as a CIDR before any network call.
+  local cidr
+  for cidr in "${ALLOW_IPS[@]+"${ALLOW_IPS[@]}"}"; do
+    [[ "$cidr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/([0-9]|[12][0-9]|3[0-2])$ || "$cidr" =~ ^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$ ]] \
+      || die "malformed --allow-ip '$cidr' — want a CIDR such as 203.0.113.0/29 or 2001:db8::/48"
+  done
+
   # Suppressing the value box is only safe when the value has somewhere else to
   # land. Cloudflare shows a token value exactly once; a mint that neither prints
   # nor stores it creates a live credential nobody can ever use or (by value)
@@ -837,7 +853,7 @@ mint_dry_run(){
     expires="$(epoch_to_rfc3339 "$(( $(date -u +%s) + TTL_SECONDS ))")"
     info "would set an expiry (--ttl $TTL): expires_on ≈ $expires (recomputed at POST time on a real run)"
   fi
-  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires")"
+  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires" "$(allow_json)")"
 
   if [[ -n "$VAULT_SECRET" ]]; then
     info "would first prove vault '$VAULT_NAME' takes a secret write, before any Cloudflare call:"
@@ -872,6 +888,12 @@ mint_dry_run(){
   hdr "dry run complete — no token was created"
 }
 
+# allow_json: the --allow-ip list as a JSON array ([] when none were given).
+allow_json(){
+  if [[ ${#ALLOW_IPS[@]} -eq 0 ]]; then printf '[]'
+  else printf '%s\n' "${ALLOW_IPS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))'; fi
+}
+
 # build_body: assemble the {name, policies:[…]} request body. Emits a zone policy
 # when there are zone-scoped groups and an account policy when there are
 # account-scoped groups — either, both, or (degenerate) neither. Shared by the
@@ -879,7 +901,7 @@ mint_dry_run(){
 # The 6th arg is the optional expires_on instant (--ttl); empty omits the field,
 # so a mint without a TTL sends exactly the body it always sent.
 build_body(){
-  local name="$1" zpg="$2" zres="$3" apg="$4" ares="$5" expires="${6:-}"
+  local name="$1" zpg="$2" zres="$3" apg="$4" ares="$5" expires="${6:-}" allow="${7:-[]}"
   local policies='[]'
   if [[ "$zpg" != "[]" ]]; then
     policies="$(jq -c --argjson pg "$zpg" --argjson res "$zres" \
@@ -889,8 +911,9 @@ build_body(){
     policies="$(jq -c --argjson pg "$apg" --argjson res "$ares" \
       '. + [{effect:"allow", permission_groups:$pg, resources:$res}]' <<<"$policies")"
   fi
-  jq -nc --arg n "$name" --argjson p "$policies" --arg e "$expires" \
-    '{name:$n, policies:$p} + (if $e == "" then {} else {expires_on:$e} end)'
+  jq -nc --arg n "$name" --argjson p "$policies" --arg e "$expires" --argjson a "$allow" \
+    '{name:$n, policies:$p} + (if $e == "" then {} else {expires_on:$e} end)
+     + (if ($a | length) == 0 then {} else {condition:{request_ip:{in:$a}}} end)'
 }
 
 mint_live(){
@@ -1045,11 +1068,27 @@ mint_live(){
   if [[ -n "$TTL_SECONDS" ]]; then
     expires="$(epoch_to_rfc3339 "$(( $(date -u +%s) + TTL_SECONDS ))")"
   fi
-  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires")"
+  body="$(build_body "$NAME" "$zone_pg" "$zone_res" "$acct_pg" "$acct_res" "$expires" "$(allow_json)")"
   result="$(cf_ok "create token" POST "user/tokens" "$body")"
   token="$(jq -r '.result.value // empty' <<<"$result")"
   token_id="$(jq -r '.result.id // empty' <<<"$result")"
   [[ -n "$token" ]] || die "token created but no value returned — check with --list (id: ${token_id:-unknown})" 1
+
+  # An --allow-ip restriction must be on the token Cloudflare created, not just in
+  # the request: an unrecognised condition key would be dropped silently and leave
+  # an unrestricted token. Compare what came back; on a mismatch revoke and fail.
+  if [[ ${#ALLOW_IPS[@]} -gt 0 ]]; then
+    local want got
+    want="$(allow_json | jq -c 'sort')"
+    got="$(jq -c '(.result.condition.request_ip.in // .result.condition["request.ip"].in // []) | sort' <<<"$result")"
+    if [[ "$want" != "$got" ]]; then
+      fail "Cloudflare did not confirm the --allow-ip restriction (sent $want, got $got) — revoking token $token_id"
+      cf_ok "revoke unrestricted token $token_id" DELETE "user/tokens/$token_id" >/dev/null \
+        || fail "revoke FAILED — remove it by hand: --revoke $token_id"
+      die "minted token lacked the requested IP restriction — revoked, nothing stored" 1
+    fi
+    pass "Cloudflare confirms the token only works from: $(allow_json | jq -r 'join(", ")')"
+  fi
 
   # 5. VERIFY before anything can treat the new value as a credential. A mint
   #    once produced a value that did not authenticate, and storing it replaced

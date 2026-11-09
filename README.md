@@ -97,7 +97,7 @@ tools:
 
 Both remain usable directly and their flags are unchanged, so existing call
 sites keep working. `cf-minter` covers the common path rather than every flag —
-`cf-mint-token.sh` carries nine more (`--name`, `--value-file`,
+`cf-mint-token.sh` carries ten more (`--name`, `--value-file`, `--allow-ip`,
 `--no-print-value`, `--vault-name`, and others) for callers that need them.
 `./cf-mint-token.sh --help` lists them. You should not need it to use the tool. `cf-minter run` is `cf-scoped-run.sh`; `cf-minter mint` is
 `cf-scoped-run.sh --mint-only`; `cf-minter list` is `cf-mint-token.sh --list`,
